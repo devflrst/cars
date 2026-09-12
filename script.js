@@ -57,7 +57,7 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-/* ---------- Подгонка канваса под контейнер ---------- */
+/* ---------- Размер канваса под контейнер ---------- */
 function resizeCanvas() {
   const parent = canvas.parentElement;
   if (!parent) return;
@@ -102,6 +102,10 @@ function seedClouds() {
 function createCar(x, y, angle, color, isPlayer = false) {
   return {
     x, y, vx: 0, vy: 0, angle,
+    // для плавной интерполяции сетевого соперника
+    targetX: x,
+    targetY: y,
+    targetAngle: angle,
     radius: isPlayer ? 18 : 16,
     color, isPlayer, boostTimer: 0,
   };
@@ -171,7 +175,7 @@ function getIslandBounds() {
   };
 }
 
-/* ---------- Камера следует за игроком ---------- */
+/* ---------- Камера ---------- */
 function setCamera() {
   const player = world.cars.find((car) => car.isPlayer);
   if (!player) return;
@@ -193,6 +197,29 @@ function keepCarsInsideWorld() {
 function sendPeerAction(type, payload) {
   if (!world.connection || !world.connection.open) return;
   world.connection.send(JSON.stringify({ type, payload, ts: Date.now() }));
+}
+
+/* ---------- Вектор движения из джойстика и клавиш ---------- */
+function getMoveVector() {
+  let x = 0;
+  let y = 0;
+
+  if (input.left) x -= 1;
+  if (input.right) x += 1;
+  if (input.up) y -= 1;
+  if (input.down) y += 1;
+
+  if (mobileInput.active) {
+    x += mobileInput.x;
+    y += mobileInput.y;
+  }
+
+  const mag = Math.hypot(x, y);
+  if (mag > 1) {
+    x /= mag;
+    y /= mag;
+  }
+  return { x, y, mag: Math.min(mag, 1) };
 }
 
 /* ---------- Джойстик ---------- */
@@ -230,44 +257,51 @@ function resetJoystick() {
   if (joystickKnob) joystickKnob.style.transform = 'translate(0, 0)';
 }
 
-/* ---------- Физика машины ---------- */
+/* ---------- Физика: машина едет туда, куда смотрит джойстик ---------- */
 function handleCarInput(car, dt) {
   if (!car) return;
 
-  const turnStrength = 2.2;
-  const accel = 240;
-  const reverseAccel = 180;
-  const friction = 0.985;
-  const maxSpeed = 260;
+  const accel = 560;          // разгон
+  const maxSpeed = 300;       // потолок скорости
+  const turnRate = 14;        // рад/сек — насколько быстро машина доворачивается
+  const dampingDrive = 2.0;   // затухание, когда есть ввод
+  const dampingIdle = 7.0;    // затухание, когда ввод отпущен
 
-  let steer = 0;
-  if (input.left) steer -= 1;
-  if (input.right) steer += 1;
-  if (mobileInput.x < -0.2) steer -= 1;
-  if (mobileInput.x > 0.2) steer += 1;
-  steer = clamp(steer, -1, 1);
+  const move = getMoveVector();
+  const hasInput = move.mag > 0.12;
 
-  let throttle = 0;
-  if (input.up) throttle += 1;
-  if (input.down) throttle -= 0.7;
-  if (mobileInput.y < -0.2) throttle += 1;
-  if (mobileInput.y > 0.2) throttle -= 0.7;
-  throttle = clamp(throttle, -0.7, 1);
+  if (hasInput) {
+    // куда должна повернуться машина
+    const targetAngle = Math.atan2(move.y, move.x);
 
-  if (steer !== 0) car.angle += steer * turnStrength * dt;
+    // кратчайший угол поворота
+    let diff = targetAngle - car.angle;
+    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
 
-  if (throttle !== 0) {
-    const desiredAccel = throttle > 0 ? accel : reverseAccel;
-    car.vx += Math.cos(car.angle) * desiredAccel * throttle * dt;
-    car.vy += Math.sin(car.angle) * desiredAccel * throttle * dt;
+    const maxTurn = turnRate * dt;
+    if (Math.abs(diff) <= maxTurn) {
+      car.angle = targetAngle;
+    } else {
+      car.angle += Math.sign(diff) * maxTurn;
+    }
+
+    // ускорение в направлении джойстика — «аркадное», мгновенный отклик
+    car.vx += move.x * accel * move.mag * dt;
+    car.vy += move.y * accel * move.mag * dt;
   }
 
   if (input.boost && car.isPlayer) {
-    const boostForce = 360;
+    const boostForce = 480;
     car.vx += Math.cos(car.angle) * boostForce * dt;
     car.vy += Math.sin(car.angle) * boostForce * dt;
     car.boostTimer = 0.2;
   }
+
+  // трение через exp — стабильно при любом FPS
+  const damping = hasInput ? dampingDrive : dampingIdle;
+  const factor = Math.exp(-damping * dt);
+  car.vx *= factor;
+  car.vy *= factor;
 
   const speed = Math.hypot(car.vx, car.vy);
   if (speed > maxSpeed) {
@@ -276,13 +310,8 @@ function handleCarInput(car, dt) {
     car.vy *= scale;
   }
 
-  if (!input.boost && Math.abs(throttle) < 0.05) {
-    car.vx *= friction;
-    car.vy *= friction;
-  }
-
-  if (Math.abs(car.vx) < 0.02) car.vx = 0;
-  if (Math.abs(car.vy) < 0.02) car.vy = 0;
+  if (Math.abs(car.vx) < 0.05) car.vx = 0;
+  if (Math.abs(car.vy) < 0.05) car.vy = 0;
 
   car.x += car.vx * dt;
   car.y += car.vy * dt;
@@ -359,40 +388,74 @@ function updateCrates(dt) {
   }
 }
 
+/* ---------- Сетевой соперник: только цель, позиция — через lerp ---------- */
 function applyRemoteState(packet) {
   if (!packet || !packet.payload) return;
   const remoteCar = getRemoteCar() || ensureRemoteCar();
   const { x, y, angle, vx, vy } = packet.payload;
-  if (typeof x === 'number') remoteCar.x = x;
-  if (typeof y === 'number') remoteCar.y = y;
-  if (typeof angle === 'number') remoteCar.angle = angle;
+
+  if (typeof x === 'number') remoteCar.targetX = x;
+  if (typeof y === 'number') remoteCar.targetY = y;
+  if (typeof angle === 'number') remoteCar.targetAngle = angle;
   if (typeof vx === 'number') remoteCar.vx = vx;
   if (typeof vy === 'number') remoteCar.vy = vy;
 }
 
 function updateRemoteCars(dt) {
-  if (world.connection && world.connection.open) return;
-
   const remoteCar = getRemoteCar();
   if (!remoteCar) return;
 
+  /* --- Онлайн: плавно догоняем присланную цель --- */
+  if (world.connection && world.connection.open) {
+    // ~14 «догонов» в секунду, не зависит от FPS
+    const t = 1 - Math.exp(-14 * dt);
+
+    remoteCar.x += (remoteCar.targetX - remoteCar.x) * t;
+    remoteCar.y += (remoteCar.targetY - remoteCar.y) * t;
+
+    let diff = remoteCar.targetAngle - remoteCar.angle;
+    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+    remoteCar.angle += diff * t;
+
+    // сохраняем видимую скорость (для будущих эффектов)
+    remoteCar.vx = remoteCar.targetX - remoteCar.x;
+    remoteCar.vy = remoteCar.targetY - remoteCar.y;
+    return;
+  }
+
+  /* --- Оффлайн: спокойный бот без дёрганья --- */
   const target = world.cars[0];
+  if (!target) return;
+
   const dx = target.x - remoteCar.x;
   const dy = target.y - remoteCar.y;
   const angleToTarget = Math.atan2(dy, dx);
-  const diff = ((angleToTarget - remoteCar.angle + Math.PI) % (Math.PI * 2)) - Math.PI;
 
-  if (Math.abs(diff) > 0.12) {
-    remoteCar.angle += diff * 0.9 * dt * 2.4;
+  let diff = angleToTarget - remoteCar.angle;
+  diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+
+  const turnRate = 3.2;
+  const maxTurn = turnRate * dt;
+  if (Math.abs(diff) <= maxTurn) {
+    remoteCar.angle = angleToTarget;
+  } else {
+    remoteCar.angle += Math.sign(diff) * maxTurn;
   }
 
-  const drift = Math.sin(performance.now() * 0.001 + 2) * 0.3;
-  remoteCar.vx += Math.cos(remoteCar.angle + drift) * 65 * dt;
-  remoteCar.vy += Math.sin(remoteCar.angle + drift) * 65 * dt;
+  // мягкий разгон вперёд, без синусоидального дёрганья
+  const accel = 200;
+  remoteCar.vx += Math.cos(remoteCar.angle) * accel * dt;
+  remoteCar.vy += Math.sin(remoteCar.angle) * accel * dt;
+
+  const damping = 1.4;
+  const factor = Math.exp(-damping * dt);
+  remoteCar.vx *= factor;
+  remoteCar.vy *= factor;
 
   const currentSpeed = Math.hypot(remoteCar.vx, remoteCar.vy);
-  if (currentSpeed > 170) {
-    const scale = 170 / currentSpeed;
+  const maxSpeed = 210;
+  if (currentSpeed > maxSpeed) {
+    const scale = maxSpeed / currentSpeed;
     remoteCar.vx *= scale;
     remoteCar.vy *= scale;
   }
@@ -400,6 +463,7 @@ function updateRemoteCars(dt) {
   remoteCar.x += remoteCar.vx * dt;
   remoteCar.y += remoteCar.vy * dt;
 
+  // держимся в пределах острова
   const dxToIsland = remoteCar.x - world.island.x;
   const dyToIsland = remoteCar.y - world.island.y;
   const absX = Math.abs(dxToIsland);
@@ -420,6 +484,11 @@ function updateRemoteCars(dt) {
 
   remoteCar.x = clamp(remoteCar.x, 120, world.width - 120);
   remoteCar.y = clamp(remoteCar.y, 120, world.height - 120);
+
+  // синхронизируем «цель» с фактической позицией, чтобы при подключении игрока не было рывка
+  remoteCar.targetX = remoteCar.x;
+  remoteCar.targetY = remoteCar.y;
+  remoteCar.targetAngle = remoteCar.angle;
 }
 
 function updateParticles(dt) {
@@ -466,7 +535,7 @@ function update(dt) {
   }
 }
 
-/* ---------- Отрисовка ---------- */
+/* ---------- Рисование ---------- */
 function drawSky() {
   const gradient = ctx.createLinearGradient(0, 0, 0, view.height);
   gradient.addColorStop(0, '#7fbdf8');
