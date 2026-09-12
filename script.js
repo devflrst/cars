@@ -29,6 +29,14 @@ const settings = {
   trails: true,
 };
 
+const NET = {
+  stateHz: 60,              // как часто отправляем позицию
+  cratesHz: 20,             // как часто хост шлёт коробки
+  pingHz: 1,                // как часто шлём ping
+  remoteInterpDelay: 100,   // мс — задержка интерполяции соперника
+  boostFxDuration: 0.35,    // сек — сколько светится чужая машина после буста
+};
+
 const world = {
   width: 2000,
   height: 1600,
@@ -43,6 +51,9 @@ const world = {
   isHost: null,
   lastStateSentAt: 0,
   lastCratesSentAt: 0,
+  lastPingSentAt: 0,
+  lastPingReceivedAt: 0,
+  ping: null,
 };
 
 const input = {
@@ -105,6 +116,9 @@ function createCar(x, y, angle, color, isPlayer = false) {
   return {
     x, y, vx: 0, vy: 0, angle,
     targetX: x, targetY: y, targetAngle: angle,
+    // буфер снапшотов для интерполяции
+    buffer: [],
+    boostFxTimer: 0,
     radius: isPlayer ? 18 : 16,
     color, isPlayer, boostTimer: 0,
   };
@@ -140,6 +154,7 @@ function getRemoteCar() {
 
 function ensureRemoteCar() {
   if (!getRemoteCar()) {
+    // спавн не важен — на первом пакете позиция снапнется
     world.cars.push(createCar(1090, 680, -Math.PI / 2, '#7dd9ff', false));
   }
   refreshOpponentStatus();
@@ -152,18 +167,25 @@ function removeRemoteCar() {
 
 function refreshOpponentStatus() {
   const opponents = world.cars.filter((car) => !car.isPlayer);
-  const text = opponents.length
-    ? `${opponents.length} соперник${opponents.length > 1 ? 'а' : ''}`
-    : world.connection && world.connection.open
-      ? '1 соперник'
-      : '0 соперников';
-  setStatusText(enemyLabel, text);
+  if (world.connection && world.connection.open) {
+    const pingTxt = world.ping != null ? ` · ${world.ping} ms` : '';
+    setStatusText(
+      enemyLabel,
+      `${opponents.length ? 'соперник online' : 'соперник…'}${pingTxt}`
+    );
+  } else {
+    setStatusText(enemyLabel, 'нет соперника');
+  }
 }
 
 function resetRace() {
-  world.cars = [createPlayer()];
+  const player = createPlayer();
+  world.cars = [player];
   world.particles = [];
   if (!world.crates.length) seedCrates();
+  if (world.connection && world.connection.open) {
+    ensureRemoteCar();
+  }
   setStatusText(modeLabel, 'Свободный заезд');
   setStatusText(islandLabel, 'Готов');
   refreshOpponentStatus();
@@ -409,7 +431,8 @@ function updateCrates(dt) {
     simulateCrates(dt);
 
     if (world.connection && world.connection.open && world.isHost) {
-      if (performance.now() - world.lastCratesSentAt > 60) {
+      const interval = 1000 / NET.cratesHz;
+      if (performance.now() - world.lastCratesSentAt > interval) {
         sendCratesState();
         world.lastCratesSentAt = performance.now();
       }
@@ -444,100 +467,71 @@ function applyCratesState(payload, snap) {
   }
 }
 
-/* ---------- Сетевой соперник ---------- */
+/* ---------- Сетевой соперник: интерполяция по буферу ---------- */
 function applyRemoteState(packet) {
   if (!packet || !packet.payload) return;
   const remoteCar = getRemoteCar() || ensureRemoteCar();
-  const { x, y, angle, vx, vy } = packet.payload;
+  const { x, y, angle } = packet.payload;
+  if (typeof x !== 'number' || typeof y !== 'number' || typeof angle !== 'number') return;
 
-  if (typeof x === 'number') remoteCar.targetX = x;
-  if (typeof y === 'number') remoteCar.targetY = y;
-  if (typeof angle === 'number') remoteCar.targetAngle = angle;
-  if (typeof vx === 'number') remoteCar.vx = vx;
-  if (typeof vy === 'number') remoteCar.vy = vy;
+  const now = performance.now();
+  remoteCar.buffer.push({ x, y, angle, t: now });
+
+  // не копим лишнее — 1 секунда истории хватит
+  while (remoteCar.buffer.length > 60) remoteCar.buffer.shift();
 }
 
 function updateRemoteCars(dt) {
   const remoteCar = getRemoteCar();
   if (!remoteCar) return;
 
-  if (world.connection && world.connection.open) {
-    const t = 1 - Math.exp(-14 * dt);
+  // без соединения чужой машины нет вовсе
+  if (!world.connection || !world.connection.open) return;
 
-    remoteCar.x += (remoteCar.targetX - remoteCar.x) * t;
-    remoteCar.y += (remoteCar.targetY - remoteCar.y) * t;
+  if (remoteCar.boostFxTimer > 0) {
+    remoteCar.boostFxTimer = Math.max(0, remoteCar.boostFxTimer - dt);
+  }
 
-    let diff = remoteCar.targetAngle - remoteCar.angle;
-    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
-    remoteCar.angle += diff * t;
+  const buf = remoteCar.buffer;
+  if (buf.length === 0) return;
 
-    remoteCar.vx = remoteCar.targetX - remoteCar.x;
-    remoteCar.vy = remoteCar.targetY - remoteCar.y;
+  const renderAt = performance.now() - NET.remoteInterpDelay;
+
+  // выбрасываем слишком старые снапшоты (но оставляем хотя бы 2)
+  while (buf.length > 2 && buf[1].t < renderAt) buf.shift();
+
+  if (buf.length === 1) {
+    const s = buf[0];
+    remoteCar.x = s.x;
+    remoteCar.y = s.y;
+    remoteCar.angle = s.angle;
     return;
   }
 
-  const target = world.cars[0];
-  if (!target) return;
+  const a = buf[0];
+  const b = buf[1];
 
-  const dx = target.x - remoteCar.x;
-  const dy = target.y - remoteCar.y;
-  const angleToTarget = Math.atan2(dy, dx);
+  if (renderAt <= a.t) {
+    remoteCar.x = a.x;
+    remoteCar.y = a.y;
+    remoteCar.angle = a.angle;
+    return;
+  }
 
-  let diff = angleToTarget - remoteCar.angle;
+  const span = b.t - a.t;
+  const t = span > 0 ? clamp((renderAt - a.t) / span, 0, 1) : 0;
+
+  remoteCar.x = a.x + (b.x - a.x) * t;
+  remoteCar.y = a.y + (b.y - a.y) * t;
+
+  let diff = b.angle - a.angle;
   diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+  remoteCar.angle = a.angle + diff * t;
 
-  const turnRate = 3.2;
-  const maxTurn = turnRate * dt;
-  if (Math.abs(diff) <= maxTurn) {
-    remoteCar.angle = angleToTarget;
-  } else {
-    remoteCar.angle += Math.sign(diff) * maxTurn;
+  if (span > 0) {
+    remoteCar.vx = ((b.x - a.x) / span) * 1000;
+    remoteCar.vy = ((b.y - a.y) / span) * 1000;
   }
-
-  const accel = 200;
-  remoteCar.vx += Math.cos(remoteCar.angle) * accel * dt;
-  remoteCar.vy += Math.sin(remoteCar.angle) * accel * dt;
-
-  const damping = 1.4;
-  const factor = Math.exp(-damping * dt);
-  remoteCar.vx *= factor;
-  remoteCar.vy *= factor;
-
-  const currentSpeed = Math.hypot(remoteCar.vx, remoteCar.vy);
-  const maxSpeed = 210;
-  if (currentSpeed > maxSpeed) {
-    const scale = maxSpeed / currentSpeed;
-    remoteCar.vx *= scale;
-    remoteCar.vy *= scale;
-  }
-
-  remoteCar.x += remoteCar.vx * dt;
-  remoteCar.y += remoteCar.vy * dt;
-
-  const dxToIsland = remoteCar.x - world.island.x;
-  const dyToIsland = remoteCar.y - world.island.y;
-  const absX = Math.abs(dxToIsland);
-  const absY = Math.abs(dyToIsland);
-  const half = world.island.size * 0.5 - remoteCar.radius * 1.9;
-
-  if (absX > half || absY > half) {
-    const overlapX = Math.max(0, absX - half);
-    const overlapY = Math.max(0, absY - half);
-    const pushX = absX > half ? (dxToIsland >= 0 ? 1 : -1) : 0;
-    const pushY = absY > half ? (dyToIsland >= 0 ? 1 : -1) : 0;
-
-    remoteCar.x -= pushX * overlapX * 1.7;
-    remoteCar.y -= pushY * overlapY * 1.7;
-    remoteCar.vx *= 0.8;
-    remoteCar.vy *= 0.8;
-  }
-
-  remoteCar.x = clamp(remoteCar.x, 120, world.width - 120);
-  remoteCar.y = clamp(remoteCar.y, 120, world.height - 120);
-
-  remoteCar.targetX = remoteCar.x;
-  remoteCar.targetY = remoteCar.y;
-  remoteCar.targetAngle = remoteCar.angle;
 }
 
 /* ---------- Коллизия машин между собой ---------- */
@@ -595,6 +589,32 @@ function updateParticles(dt) {
   }
 }
 
+/* ---------- Сетевые служебные события ---------- */
+function emitBoostFx(car) {
+  if (!car) return;
+  car.boostFxTimer = NET.boostFxDuration;
+  const forward = car.angle;
+  for (let i = 0; i < 10; i += 1) {
+    world.particles.push({
+      x: car.x - Math.cos(forward) * (12 + Math.random() * 14),
+      y: car.y - Math.sin(forward) * (12 + Math.random() * 14),
+      life: 22, maxLife: 22,
+      color: '#ffe28a',
+      r: car.radius * 0.55,
+    });
+  }
+  if (world.particles.length > 260) world.particles.shift();
+}
+
+function broadcastBoost() {
+  sendPeerAction('boost', {});
+}
+
+function broadcastReset() {
+  sendPeerAction('reset', {});
+}
+
+/* ---------- Главный апдейт ---------- */
 function update(dt) {
   if (!world.cars.length) resetRace();
 
@@ -608,13 +628,21 @@ function update(dt) {
   updateRemoteCars(dt);
   resolveCarCollisions();
 
-  if (world.connection && world.connection.open && performance.now() - world.lastStateSentAt > 80) {
-    sendPeerAction('state', {
-      x: player.x, y: player.y,
-      angle: player.angle,
-      vx: player.vx, vy: player.vy,
-    });
-    world.lastStateSentAt = performance.now();
+  // сетевые таймеры
+  if (world.connection && world.connection.open) {
+    const now = performance.now();
+
+    if (now - world.lastStateSentAt > 1000 / NET.stateHz) {
+      sendPeerAction('state', {
+        x: player.x, y: player.y, angle: player.angle,
+      });
+      world.lastStateSentAt = now;
+    }
+
+    if (now - world.lastPingSentAt > 1000 / NET.pingHz) {
+      sendPeerAction('ping', { t: now });
+      world.lastPingSentAt = now;
+    }
   }
 
   if (player && player.boostTimer > 0) player.boostTimer -= dt;
@@ -726,10 +754,15 @@ function drawCar(car) {
   ctx.translate(x, y);
   ctx.rotate(car.angle);
 
-  ctx.fillStyle = car.color;
-  ctx.shadowColor = settings.glow ? car.color : 'transparent';
-  ctx.shadowBlur = settings.glow ? 16 : 0;
+  if (car.boostFxTimer > 0) {
+    ctx.shadowColor = '#ffe28a';
+    ctx.shadowBlur = 30;
+  } else {
+    ctx.shadowColor = settings.glow ? car.color : 'transparent';
+    ctx.shadowBlur = settings.glow ? 16 : 0;
+  }
 
+  ctx.fillStyle = car.color;
   ctx.fillRect(-18, -10, 36, 20);
   ctx.fillStyle = 'rgba(18, 26, 32, 0.75)';
   ctx.fillRect(-10, -8, 20, 16);
@@ -804,7 +837,6 @@ function initPeer() {
 
 function attachConnection(conn) {
   world.connection = conn;
-  ensureRemoteCar();
   refreshOpponentStatus();
 
   conn.on('open', () => {
@@ -846,6 +878,32 @@ function attachConnection(conn) {
         }
         return;
       }
+
+      if (packet.type === 'boost') {
+        emitBoostFx(getRemoteCar());
+        return;
+      }
+
+      if (packet.type === 'reset') {
+        // применяем сброс без повторной рассылки
+        resetRace();
+        return;
+      }
+
+      if (packet.type === 'ping') {
+        // отвечаем тем же t — считаем RTT на своей стороне
+        sendPeerAction('pong', { t: packet.payload && packet.payload.t });
+        return;
+      }
+
+      if (packet.type === 'pong') {
+        const sentAt = packet.payload && packet.payload.t;
+        if (typeof sentAt === 'number') {
+          world.ping = Math.max(1, Math.round(performance.now() - sentAt));
+          refreshOpponentStatus();
+        }
+        return;
+      }
     } catch (error) {
       console.warn('Peer message error', error);
     }
@@ -854,6 +912,7 @@ function attachConnection(conn) {
   conn.on('close', () => {
     world.connection = null;
     world.isHost = null;
+    world.ping = null;
     networkStatusEl.textContent = 'ожидание';
     removeRemoteCar();
     for (const crate of world.crates) {
@@ -927,12 +986,19 @@ function triggerBoost() {
   player.vx += Math.cos(player.angle) * 160;
   player.vy += Math.sin(player.angle) * 160;
   player.boostTimer = 0.4;
+
+  // локальный визуал
+  emitBoostFx(player);
+
+  // и напарнику, чтобы он тоже видел буст
+  broadcastBoost();
 }
 
 if (resetBtn) {
   resetBtn.addEventListener('click', () => {
     resetRace();
     setCamera();
+    broadcastReset();
   });
 }
 
