@@ -15,11 +15,16 @@ function setStatusText(element, value) {
     element.textContent = value;
   }
 }
+
 const resetBtn = document.getElementById('reset-btn');
 const boostBtn = document.getElementById('boost-btn');
 const copyLinkBtn = document.getElementById('copy-link-btn');
+const mobileBoostBtn = document.getElementById('mobile-boost-btn');
 const joystickBase = document.getElementById('joystick-base');
 const joystickKnob = document.getElementById('joystick-knob');
+
+/* Логический размер вьюпорта (CSS-пиксели) и DPR для чёткой картинки */
+const view = { width: 960, height: 620, dpr: 1 };
 
 const settings = {
   glow: true,
@@ -62,6 +67,31 @@ const mobileInput = {
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
+
+/* ---- Подгонка канваса под контейнер с учётом devicePixelRatio ---- */
+function resizeCanvas() {
+  const parent = canvas.parentElement;
+  if (!parent) return;
+
+  const rect = parent.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const cssW = Math.max(1, Math.floor(rect.width));
+  const cssH = Math.max(1, Math.floor(rect.height));
+  const bufW = Math.max(1, Math.floor(cssW * dpr));
+  const bufH = Math.max(1, Math.floor(cssH * dpr));
+
+  if (canvas.width !== bufW || canvas.height !== bufH) {
+    canvas.width = bufW;
+    canvas.height = bufH;
+  }
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  view.width = cssW;
+  view.height = cssH;
+  view.dpr = dpr;
+}
+
+/* ---------------------- Игровые сущности ---------------------- */
 
 function createCloud(x, y, scale, speed) {
   return { x, y, scale, speed, offset: Math.random() * Math.PI * 2 };
@@ -171,67 +201,43 @@ function getIslandBounds() {
   };
 }
 
+/* Камера следует за игроком (важно для мобильных экранов) */
 function setCamera() {
-  const halfWidth = canvas.width / 2;
-  const halfHeight = canvas.height / 2;
+  const player = world.cars.find((car) => car.isPlayer);
+  if (!player) return;
 
-  world.camera.x = clamp(world.island.x - halfWidth, 0, world.width - canvas.width);
-  world.camera.y = clamp(world.island.y - halfHeight, 0, world.height - canvas.height);
+  const maxX = Math.max(0, world.width - view.width);
+  const maxY = Math.max(0, world.height - view.height);
 
-  const leftLimit = world.camera.x;
-  const rightLimit = world.camera.x + canvas.width;
-  const topLimit = world.camera.y;
-  const bottomLimit = world.camera.y + canvas.height;
+  const targetX = player.x - view.width / 2;
+  const targetY = player.y - view.height / 2;
 
-  for (const car of world.cars) {
-    car.x = clamp(car.x, leftLimit + car.radius + 8, rightLimit - car.radius - 8);
-    car.y = clamp(car.y, topLimit + car.radius + 8, bottomLimit - car.radius - 8);
-  }
+  world.camera.x = clamp(targetX, 0, maxX);
+  world.camera.y = clamp(targetY, 0, maxY);
 }
 
 function keepCarsInsideWorld() {
-  const worldLeft = 0;
-  const worldRight = world.width;
-  const worldTop = 0;
-  const worldBottom = world.height;
-
   for (const car of world.cars) {
-    car.x = clamp(car.x, worldLeft + car.radius, worldRight - car.radius);
-    car.y = clamp(car.y, worldTop + car.radius, worldBottom - car.radius);
+    car.x = clamp(car.x, car.radius, world.width - car.radius);
+    car.y = clamp(car.y, car.radius, world.height - car.radius);
   }
 }
 
 function sendPeerAction(type, payload) {
-  if (!world.connection || !world.connection.open) {
-    return;
-  }
-
+  if (!world.connection || !world.connection.open) return;
   world.connection.send(JSON.stringify({ type, payload, ts: Date.now() }));
 }
 
-function updateJoystickState() {
-  const pad = joystickBase;
-  if (!pad) return;
+/* ------------------------- Джойстик ------------------------- */
 
-  const dx = mobileInput.x;
-  const dy = mobileInput.y;
-  const radius = 34;
-  const knobX = clamp(dx * radius, -radius, radius);
-  const knobY = clamp(dy * radius, -radius, radius);
+function updateJoystickState() {
+  if (!joystickBase || !joystickKnob) return;
+
+  const radius = joystickBase.clientWidth * 0.3;
+  const knobX = clamp(mobileInput.x * radius, -radius, radius);
+  const knobY = clamp(mobileInput.y * radius, -radius, radius);
 
   joystickKnob.style.transform = `translate(${knobX}px, ${knobY}px)`;
-}
-
-function syncTouchMovement() {
-  const leftPressed = input.left || mobileInput.x < -0.2;
-  const rightPressed = input.right || mobileInput.x > 0.2;
-  const upPressed = input.up || mobileInput.y < -0.2;
-  const downPressed = input.down || mobileInput.y > 0.2;
-
-  input.left = leftPressed;
-  input.right = rightPressed;
-  input.up = upPressed;
-  input.down = downPressed;
 }
 
 function handleJoystickPointer(event) {
@@ -250,7 +256,6 @@ function handleJoystickPointer(event) {
   mobileInput.y = Math.sin(angle) * (distance / maxDistance);
   mobileInput.active = true;
 
-  syncTouchMovement();
   updateJoystickState();
 }
 
@@ -261,27 +266,35 @@ function resetJoystick() {
   if (joystickKnob) {
     joystickKnob.style.transform = 'translate(0, 0)';
   }
-  input.left = false;
-  input.right = false;
-  input.up = false;
-  input.down = false;
 }
 
+/* ------------------------- Физика ------------------------- */
+
 function handleCarInput(car, dt) {
-  if (!car) {
-    return;
-  }
+  if (!car) return;
 
   const turnStrength = 2.2;
   const accel = 240;
   const reverseAccel = 180;
   const friction = 0.985;
   const maxSpeed = 260;
-  const steeringInput = (input.left ? -1 : 0) + (input.right ? 1 : 0) + (mobileInput.x < -0.2 ? -1 : 0) + (mobileInput.x > 0.2 ? 1 : 0);
-  const throttle = (input.up ? 1 : 0) + (input.down ? -0.7 : 0) + (mobileInput.y < -0.2 ? 1 : 0) + (mobileInput.y > 0.2 ? -0.7 : 0);
 
-  if (steeringInput !== 0) {
-    car.angle += steeringInput * turnStrength * dt;
+  let steer = 0;
+  if (input.left) steer -= 1;
+  if (input.right) steer += 1;
+  if (mobileInput.x < -0.2) steer -= 1;
+  if (mobileInput.x > 0.2) steer += 1;
+  steer = clamp(steer, -1, 1);
+
+  let throttle = 0;
+  if (input.up) throttle += 1;
+  if (input.down) throttle -= 0.7;
+  if (mobileInput.y < -0.2) throttle += 1;
+  if (mobileInput.y > 0.2) throttle -= 0.7;
+  throttle = clamp(throttle, -0.7, 1);
+
+  if (steer !== 0) {
+    car.angle += steer * turnStrength * dt;
   }
 
   if (throttle !== 0) {
@@ -306,7 +319,7 @@ function handleCarInput(car, dt) {
     car.vy *= scale;
   }
 
-  if (!input.up && !input.down && !input.boost) {
+  if (!input.boost && Math.abs(throttle) < 0.05) {
     car.vx *= friction;
     car.vy *= friction;
   }
@@ -320,22 +333,10 @@ function handleCarInput(car, dt) {
   const bounds = getIslandBounds();
   const margin = car.radius + 10;
 
-  if (car.x < bounds.left + margin) {
-    car.x = bounds.left + margin;
-    car.vx *= -0.25;
-  }
-  if (car.x > bounds.right - margin) {
-    car.x = bounds.right - margin;
-    car.vx *= -0.25;
-  }
-  if (car.y < bounds.top + margin) {
-    car.y = bounds.top + margin;
-    car.vy *= -0.25;
-  }
-  if (car.y > bounds.bottom - margin) {
-    car.y = bounds.bottom - margin;
-    car.vy *= -0.25;
-  }
+  if (car.x < bounds.left + margin) { car.x = bounds.left + margin; car.vx *= -0.25; }
+  if (car.x > bounds.right - margin) { car.x = bounds.right - margin; car.vx *= -0.25; }
+  if (car.y < bounds.top + margin) { car.y = bounds.top + margin; car.vy *= -0.25; }
+  if (car.y > bounds.bottom - margin) { car.y = bounds.bottom - margin; car.vy *= -0.25; }
 
   if (settings.trails && speed > 30) {
     world.particles.push({
@@ -367,22 +368,10 @@ function updateCrates(dt) {
     const bounds = getIslandBounds();
     const half = crate.size * 0.5;
 
-    if (crate.x < bounds.left + half) {
-      crate.x = bounds.left + half;
-      crate.vx *= -0.45;
-    }
-    if (crate.x > bounds.right - half) {
-      crate.x = bounds.right - half;
-      crate.vx *= -0.45;
-    }
-    if (crate.y < bounds.top + half) {
-      crate.y = bounds.top + half;
-      crate.vy *= -0.45;
-    }
-    if (crate.y > bounds.bottom - half) {
-      crate.y = bounds.bottom - half;
-      crate.vy *= -0.45;
-    }
+    if (crate.x < bounds.left + half) { crate.x = bounds.left + half; crate.vx *= -0.45; }
+    if (crate.x > bounds.right - half) { crate.x = bounds.right - half; crate.vx *= -0.45; }
+    if (crate.y < bounds.top + half) { crate.y = bounds.top + half; crate.vy *= -0.45; }
+    if (crate.y > bounds.bottom - half) { crate.y = bounds.bottom - half; crate.vy *= -0.45; }
 
     for (const car of world.cars) {
       const dx = car.x - crate.x;
@@ -417,9 +406,7 @@ function updateCrates(dt) {
 }
 
 function applyRemoteState(packet) {
-  if (!packet || !packet.payload) {
-    return;
-  }
+  if (!packet || !packet.payload) return;
 
   const remoteCar = getRemoteCar() || ensureRemoteCar();
   const { x, y, angle, vx, vy } = packet.payload;
@@ -432,20 +419,16 @@ function applyRemoteState(packet) {
 }
 
 function updateRemoteCars(dt) {
-  if (world.connection && world.connection.open) {
-    return;
-  }
+  if (world.connection && world.connection.open) return;
 
   const remoteCar = getRemoteCar();
-  if (!remoteCar) {
-    return;
-  }
+  if (!remoteCar) return;
 
   const target = world.cars[0];
   const dx = target.x - remoteCar.x;
   const dy = target.y - remoteCar.y;
   const angleToTarget = Math.atan2(dy, dx);
-  let diff = ((angleToTarget - remoteCar.angle + Math.PI) % (Math.PI * 2)) - Math.PI;
+  const diff = ((angleToTarget - remoteCar.angle + Math.PI) % (Math.PI * 2)) - Math.PI;
 
   if (Math.abs(diff) > 0.12) {
     remoteCar.angle += diff * 0.9 * dt * 2.4;
@@ -529,25 +512,27 @@ function update(dt) {
   keepCarsInsideWorld();
   setCamera();
 
-  if (speedLabel) {
+  if (speedLabel && player) {
     speedLabel.textContent = `${Math.round(Math.hypot(player.vx, player.vy) * 0.6)} km/h`;
   }
-  if (modeLabel) {
-    modeLabel.textContent = player && player.boostTimer > 0 ? 'Буст активен' : 'Свободный заезд';
+  if (modeLabel && player) {
+    modeLabel.textContent = player.boostTimer > 0 ? 'Буст активен' : 'Свободный заезд';
   }
 }
 
+/* ------------------------ Отрисовка ------------------------ */
+
 function drawSky() {
-  const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  const gradient = ctx.createLinearGradient(0, 0, 0, view.height);
   gradient.addColorStop(0, '#7fbdf8');
   gradient.addColorStop(0.38, '#cfeeff');
   gradient.addColorStop(1, '#edf8ff');
   ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillRect(0, 0, view.width, view.height);
 
   if (settings.clouds) {
     for (const cloud of world.clouds) {
-      const x = ((cloud.x - world.camera.x * cloud.speed * 0.2) % (canvas.width + 220)) - 110;
+      const x = ((cloud.x - world.camera.x * cloud.speed * 0.2) % (view.width + 220)) - 110;
       const y = cloud.y + Math.sin((performance.now() * 0.00027) + cloud.offset) * 12;
       const w = 70 * cloud.scale;
       const h = 28 * cloud.scale;
@@ -612,7 +597,6 @@ function drawCrates() {
 
     ctx.fillStyle = 'rgba(255,255,255,0.08)';
     ctx.fillRect(x + 6, y + 6, s - 12, s - 12);
-
     ctx.restore();
   }
 }
@@ -673,6 +657,8 @@ function loop(ts) {
 
   requestAnimationFrame(loop);
 }
+
+/* --------------------------- PeerJS --------------------------- */
 
 function getConnectLink(peerId) {
   const url = new URL(window.location.href);
@@ -736,9 +722,7 @@ function attachConnection(conn) {
   conn.on('data', (payload) => {
     try {
       const packet = typeof payload === 'string' ? JSON.parse(payload) : payload;
-      if (!packet) {
-        return;
-      }
+      if (!packet) return;
 
       if (packet.type === 'hello') {
         ensureRemoteCar();
@@ -763,42 +747,48 @@ function attachConnection(conn) {
 
 function connectToPeer() {
   const remoteId = peerInput.value.trim();
-  if (!remoteId || !world.peer) {
-    return;
-  }
+  if (!remoteId || !world.peer) return;
 
   if (world.connection && world.connection.open) {
     world.connection.close();
     return;
   }
 
-  const conn = world.peer.connect(remoteId, {
-    reliable: true,
-  });
-
+  const conn = world.peer.connect(remoteId, { reliable: true });
   attachConnection(conn);
 }
 
+/* ------------------------ Джойстик (события) ------------------------ */
+
 if (joystickBase) {
   joystickBase.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    try {
+      joystickBase.setPointerCapture(event.pointerId);
+    } catch (e) {
+      /* игнорируем */
+    }
     handleJoystickPointer(event);
-    joystickBase.setPointerCapture(event.pointerId);
   });
 
   joystickBase.addEventListener('pointermove', (event) => {
     if (mobileInput.active) {
+      event.preventDefault();
       handleJoystickPointer(event);
     }
   });
 
-  joystickBase.addEventListener('pointerup', resetJoystick);
-  joystickBase.addEventListener('pointercancel', resetJoystick);
-  joystickBase.addEventListener('pointerleave', () => {
-    if (!mobileInput.active) {
-      resetJoystick();
-    }
-  });
+  const stop = (event) => {
+    if (event) event.preventDefault();
+    resetJoystick();
+  };
+
+  joystickBase.addEventListener('pointerup', stop);
+  joystickBase.addEventListener('pointercancel', stop);
+  joystickBase.addEventListener('lostpointercapture', stop);
 }
+
+/* ------------------------ Клавиатура ------------------------ */
 
 window.addEventListener('keydown', (event) => {
   const key = event.key.toLowerCase();
@@ -823,10 +813,19 @@ window.addEventListener('keyup', (event) => {
   if (key === ' ') input.boost = false;
 });
 
+/* ------------------------ Кнопки ------------------------ */
+
+function triggerBoost() {
+  const player = world.cars[0];
+  if (!player) return;
+  player.vx += Math.cos(player.angle) * 160;
+  player.vy += Math.sin(player.angle) * 160;
+  player.boostTimer = 0.4;
+}
+
 resetBtn.addEventListener('click', () => {
   resetRace();
-  world.camera.x = 0;
-  world.camera.y = 0;
+  setCamera();
 });
 
 connectBtn.addEventListener('click', () => {
@@ -856,18 +855,23 @@ copyLinkBtn.addEventListener('click', async () => {
   }
 });
 
-boostBtn.addEventListener('click', () => {
-  const player = world.cars[0];
-  if (!player) return;
-  player.vx += Math.cos(player.angle) * 160;
-  player.vy += Math.sin(player.angle) * 160;
-  player.boostTimer = 0.4;
-});
+boostBtn.addEventListener('click', triggerBoost);
 
-seedClouds();
-seedCrates();
-resetRace();
-initPeer();
-update(0.016);
-drawWorld();
-requestAnimationFrame(loop);
+if (mobileBoostBtn) {
+  mobileBoostBtn.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    triggerBoost();
+  });
+}
+
+/* -------------------- Изменение размера -------------------- */
+
+function handleResize() {
+  resizeCanvas();
+}
+
+window.addEventListener('resize', handleResize);
+window.addEventListener('orientationchange', () => setTimeout(handleResize, 150));
+
+if (typeof ResizeObserver !== 'undefined') {
+  const ro = new ResizeObserver(() =>
