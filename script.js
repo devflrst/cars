@@ -23,6 +23,15 @@ const joystickKnob = document.getElementById('joystick-knob');
 
 const view = { width: 960, height: 620, dpr: 1 };
 
+/* Кэш неба (пересобирается только при ресайзе) */
+let skyGradient = null;
+let skyGradientHeight = -1;
+
+/* Офскрин-рендер острова: рисуем один раз, дальше просто blit со сдвигом камеры */
+const islandCanvas = document.createElement('canvas');
+const islandCtx = islandCanvas.getContext('2d');
+let islandBaked = false;
+
 const settings = {
   glow: true,
   clouds: true,
@@ -213,14 +222,14 @@ function resetRace() {
   refreshOpponentStatus();
 }
 
+const islandBoundsCache = { left: 0, right: 0, top: 0, bottom: 0 };
 function getIslandBounds() {
   const half = world.island.size * 0.5;
-  return {
-    left: world.island.x - half,
-    right: world.island.x + half,
-    top: world.island.y - half,
-    bottom: world.island.y + half,
-  };
+  islandBoundsCache.left = world.island.x - half;
+  islandBoundsCache.right = world.island.x + half;
+  islandBoundsCache.top = world.island.y - half;
+  islandBoundsCache.bottom = world.island.y + half;
+  return islandBoundsCache;
 }
 
 /* ---------- Камера ---------- */
@@ -600,12 +609,18 @@ function resolveCarCollisions() {
 }
 
 function updateParticles(dt) {
-  world.particles = world.particles.filter((p) => p.life > 0);
-  for (const p of world.particles) {
+  const particles = world.particles;
+  let write = 0;
+  for (let read = 0; read < particles.length; read += 1) {
+    const p = particles[read];
     p.life -= dt * 60;
+    if (p.life <= 0) continue;
     p.x += (Math.random() - 0.5) * 0.5;
     p.y += (Math.random() - 0.5) * 0.5;
+    particles[write] = p;
+    write += 1;
   }
+  particles.length = write;
 }
 
 /* ---------- Сетевые служебные события ---------- */
@@ -679,11 +694,14 @@ function update(dt) {
 
 /* ---------- Рисование ---------- */
 function drawSky() {
-  const gradient = ctx.createLinearGradient(0, 0, 0, view.height);
-  gradient.addColorStop(0, '#7fbdf8');
-  gradient.addColorStop(0.38, '#cfeeff');
-  gradient.addColorStop(1, '#edf8ff');
-  ctx.fillStyle = gradient;
+  if (!skyGradient || skyGradientHeight !== view.height) {
+    skyGradient = ctx.createLinearGradient(0, 0, 0, view.height);
+    skyGradient.addColorStop(0, '#7fbdf8');
+    skyGradient.addColorStop(0.38, '#cfeeff');
+    skyGradient.addColorStop(1, '#edf8ff');
+    skyGradientHeight = view.height;
+  }
+  ctx.fillStyle = skyGradient;
   ctx.fillRect(0, 0, view.width, view.height);
 
   if (settings.clouds) {
@@ -703,37 +721,56 @@ function drawSky() {
   }
 }
 
-function drawIsland() {
-  ctx.save();
-  const islandX = world.island.x - world.camera.x;
-  const islandY = world.island.y - world.camera.y;
+const ISLAND_PAD = 32; // запас под shadowBlur, чтобы тень не обрезалась
+
+function bakeIsland() {
   const size = world.island.size;
+  const canvasSize = size + ISLAND_PAD * 2;
+  islandCanvas.width = canvasSize;
+  islandCanvas.height = canvasSize;
 
-  ctx.beginPath();
-  ctx.roundRect(islandX - size / 2, islandY - size / 2, size, size, 42);
-  ctx.fillStyle = '#5fc76f';
-  ctx.shadowColor = 'rgba(67, 184, 92, 0.7)';
-  ctx.shadowBlur = settings.glow ? 28 : 0;
-  ctx.fill();
-  ctx.shadowBlur = 0;
+  const cx = ISLAND_PAD;
+  const cy = ISLAND_PAD;
 
-  ctx.strokeStyle = 'rgba(18, 78, 26, 0.7)';
-  ctx.lineWidth = 5;
-  ctx.beginPath();
-  ctx.roundRect(islandX - size / 2, islandY - size / 2, size, size, 42);
-  ctx.stroke();
+  islandCtx.clearRect(0, 0, canvasSize, canvasSize);
+  islandCtx.save();
 
-  ctx.fillStyle = 'rgba(26, 108, 58, 0.22)';
-  ctx.fillRect(islandX - size * 0.46, islandY - size * 0.38, size * 0.92, size * 0.76);
+  islandCtx.beginPath();
+  islandCtx.roundRect(cx, cy, size, size, 42);
+  islandCtx.fillStyle = '#5fc76f';
+  islandCtx.shadowColor = 'rgba(67, 184, 92, 0.7)';
+  islandCtx.shadowBlur = settings.glow ? 28 : 0;
+  islandCtx.fill();
+  islandCtx.shadowBlur = 0;
+
+  islandCtx.strokeStyle = 'rgba(18, 78, 26, 0.7)';
+  islandCtx.lineWidth = 5;
+  islandCtx.beginPath();
+  islandCtx.roundRect(cx, cy, size, size, 42);
+  islandCtx.stroke();
+
+  islandCtx.fillStyle = 'rgba(26, 108, 58, 0.22)';
+  islandCtx.fillRect(cx + size * 0.04, cy + size * 0.12, size * 0.92, size * 0.76);
 
   for (let i = 0; i < 20; i += 1) {
-    const x = islandX - size * 0.4 + (i / 19) * size * 0.8;
-    const y = islandY + Math.sin(i * 0.8) * size * 0.12;
-    ctx.fillStyle = 'rgba(34, 104, 57, 0.18)';
-    ctx.fillRect(x, y, 18, 18);
+    const x = cx + size * 0.1 + (i / 19) * size * 0.8;
+    const y = cy + size * 0.5 + Math.sin(i * 0.8) * size * 0.12;
+    islandCtx.fillStyle = 'rgba(34, 104, 57, 0.18)';
+    islandCtx.fillRect(x, y, 18, 18);
   }
 
-  ctx.restore();
+  islandCtx.restore();
+  islandBaked = true;
+}
+
+function drawIsland() {
+  if (!islandBaked) bakeIsland();
+
+  const size = world.island.size;
+  const islandX = world.island.x - world.camera.x - size / 2 - ISLAND_PAD;
+  const islandY = world.island.y - world.camera.y - size / 2 - ISLAND_PAD;
+
+  ctx.drawImage(islandCanvas, islandX, islandY);
 }
 
 function drawCrates() {
@@ -1099,7 +1136,6 @@ seedClouds();
 seedCrates();
 resetRace();
 initPeer();
-resizeCanvas();
 update(0.016);
 drawWorld();
 requestAnimationFrame(loop);
