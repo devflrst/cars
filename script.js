@@ -30,11 +30,36 @@ const settings = {
 };
 
 const NET = {
-  stateHz: 60,              // как часто отправляем позицию
-  cratesHz: 20,             // как часто хост шлёт коробки
-  pingHz: 1,                // как часто шлём ping
-  remoteInterpDelay: 100,   // мс — задержка интерполяции соперника
-  boostFxDuration: 0.35,    // сек — сколько светится чужая машина после буста
+  stateHz: 60,
+  cratesHz: 20,
+  pingHz: 1,
+  remoteInterpDelay: 100,
+  boostFxDuration: 0.35,
+};
+
+/* ---------- ICE: STUN + TURN ---------- */
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+  ],
+  iceCandidatePoolSize: 10,
 };
 
 const world = {
@@ -52,7 +77,6 @@ const world = {
   lastStateSentAt: 0,
   lastCratesSentAt: 0,
   lastPingSentAt: 0,
-  lastPingReceivedAt: 0,
   ping: null,
 };
 
@@ -70,7 +94,7 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-/* ---------- Размер канваса под контейнер ---------- */
+/* ---------- Размер канваса ---------- */
 function resizeCanvas() {
   const parent = canvas.parentElement;
   if (!parent) return;
@@ -116,7 +140,6 @@ function createCar(x, y, angle, color, isPlayer = false) {
   return {
     x, y, vx: 0, vy: 0, angle,
     targetX: x, targetY: y, targetAngle: angle,
-    // буфер снапшотов для интерполяции
     buffer: [],
     boostFxTimer: 0,
     radius: isPlayer ? 18 : 16,
@@ -154,7 +177,6 @@ function getRemoteCar() {
 
 function ensureRemoteCar() {
   if (!getRemoteCar()) {
-    // спавн не важен — на первом пакете позиция снапнется
     world.cars.push(createCar(1090, 680, -Math.PI / 2, '#7dd9ff', false));
   }
   refreshOpponentStatus();
@@ -467,7 +489,7 @@ function applyCratesState(payload, snap) {
   }
 }
 
-/* ---------- Сетевой соперник: интерполяция по буферу ---------- */
+/* ---------- Сетевой соперник ---------- */
 function applyRemoteState(packet) {
   if (!packet || !packet.payload) return;
   const remoteCar = getRemoteCar() || ensureRemoteCar();
@@ -477,7 +499,6 @@ function applyRemoteState(packet) {
   const now = performance.now();
   remoteCar.buffer.push({ x, y, angle, t: now });
 
-  // не копим лишнее — 1 секунда истории хватит
   while (remoteCar.buffer.length > 60) remoteCar.buffer.shift();
 }
 
@@ -485,7 +506,6 @@ function updateRemoteCars(dt) {
   const remoteCar = getRemoteCar();
   if (!remoteCar) return;
 
-  // без соединения чужой машины нет вовсе
   if (!world.connection || !world.connection.open) return;
 
   if (remoteCar.boostFxTimer > 0) {
@@ -497,7 +517,6 @@ function updateRemoteCars(dt) {
 
   const renderAt = performance.now() - NET.remoteInterpDelay;
 
-  // выбрасываем слишком старые снапшоты (но оставляем хотя бы 2)
   while (buf.length > 2 && buf[1].t < renderAt) buf.shift();
 
   if (buf.length === 1) {
@@ -534,7 +553,7 @@ function updateRemoteCars(dt) {
   }
 }
 
-/* ---------- Коллизия машин между собой ---------- */
+/* ---------- Коллизия машин ---------- */
 function resolveCarCollisions() {
   const cars = world.cars;
   for (let i = 0; i < cars.length; i += 1) {
@@ -628,7 +647,6 @@ function update(dt) {
   updateRemoteCars(dt);
   resolveCarCollisions();
 
-  // сетевые таймеры
   if (world.connection && world.connection.open) {
     const now = performance.now();
 
@@ -811,6 +829,8 @@ function initPeer() {
     port: 443,
     secure: true,
     path: '/',
+    config: ICE_SERVERS,
+    debug: 1,
   });
 
   world.peer.on('open', (id) => {
@@ -830,8 +850,18 @@ function initPeer() {
     networkStatusEl.textContent = 'подключение';
   });
 
-  world.peer.on('error', () => {
-    networkStatusEl.textContent = 'ошибка сети';
+  world.peer.on('error', (err) => {
+    console.warn('Peer error:', err);
+    const t = err && err.type ? err.type : 'unknown';
+    if (t === 'peer-unavailable') {
+      networkStatusEl.textContent = 'ID не найден';
+    } else if (t === 'network' || t === 'server-error' || t === 'socket-error') {
+      networkStatusEl.textContent = 'сервер сигнализации недоступен';
+    } else if (t === 'unavailable-id') {
+      networkStatusEl.textContent = 'ID уже занят';
+    } else {
+      networkStatusEl.textContent = `ошибка: ${t}`;
+    }
   });
 }
 
@@ -852,6 +882,22 @@ function attachConnection(conn) {
     if (world.isHost) {
       sendCratesState();
     }
+
+    // Диагностика ICE/PC
+    const pc = conn.peerConnection;
+    if (pc) {
+      pc.oniceconnectionstatechange = () => {
+        console.log('[ICE]', pc.iceConnectionState);
+      };
+      pc.onconnectionstatechange = () => {
+        console.log('[PC]', pc.connectionState);
+      };
+    }
+  });
+
+  conn.on('error', (err) => {
+    console.warn('Connection error:', err);
+    networkStatusEl.textContent = 'соединение оборвалось';
   });
 
   conn.on('data', (payload) => {
@@ -885,13 +931,11 @@ function attachConnection(conn) {
       }
 
       if (packet.type === 'reset') {
-        // применяем сброс без повторной рассылки
         resetRace();
         return;
       }
 
       if (packet.type === 'ping') {
-        // отвечаем тем же t — считаем RTT на своей стороне
         sendPeerAction('pong', { t: packet.payload && packet.payload.t });
         return;
       }
@@ -931,11 +975,14 @@ function connectToPeer() {
     return;
   }
 
-  const conn = world.peer.connect(remoteId, { reliable: true });
+  const conn = world.peer.connect(remoteId, {
+    reliable: true,
+    config: ICE_SERVERS,
+  });
   attachConnection(conn);
 }
 
-/* ---------- События джойстика ---------- */
+/* ---------- Джойстик ---------- */
 if (joystickBase) {
   joystickBase.addEventListener('pointerdown', (event) => {
     event.preventDefault();
@@ -987,10 +1034,7 @@ function triggerBoost() {
   player.vy += Math.sin(player.angle) * 160;
   player.boostTimer = 0.4;
 
-  // локальный визуал
   emitBoostFx(player);
-
-  // и напарнику, чтобы он тоже видел буст
   broadcastBoost();
 }
 
