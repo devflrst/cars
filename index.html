@@ -2,7 +2,11 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#071d2a" />
     <title>Sky Island Drift</title>
     <meta
       name="description"
@@ -48,16 +52,16 @@
               <strong id="network-status">ожидание</strong>
             </div>
           </section>
-
         </aside>
 
         <section class="game-panel">
           <div class="board-wrap">
-            <canvas id="game-canvas" width="960" height="620" aria-label="Игровая зона"></canvas>
-            <div class="mobile-controls" aria-label="Джойстик">
+            <canvas id="game-canvas" aria-label="Игровая зона"></canvas>
+            <div class="mobile-controls" aria-label="Управление">
               <div class="joystick-base" id="joystick-base">
                 <div class="joystick-knob" id="joystick-knob"></div>
               </div>
+              <button id="mobile-boost-btn" class="mobile-boost" type="button">Буст</button>
             </div>
           </div>
         </section>
