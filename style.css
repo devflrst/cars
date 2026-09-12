@@ -239,6 +239,13 @@ h1 {
   border-bottom: none;
 }
 
+.hint-text {
+  margin: 10px 0 0;
+  font-size: 0.76rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
 .stat-row strong {
   color: var(--text);
   word-break: break-all;
