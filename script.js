@@ -71,6 +71,9 @@ const ICE_SERVERS = {
   iceCandidatePoolSize: 10,
 };
 
+const PLAYER_COLORS = ['#7ef0a5', '#7dd9ff', '#ffd884', '#ff8bb6', '#c792ea', '#f4a261', '#8ee4af', '#f28fad'];
+const MAX_PLAYERS = PLAYER_COLORS.length;
+
 const world = {
   width: 2000,
   height: 1600,
@@ -81,13 +84,34 @@ const world = {
   crates: [],
   particles: [],
   peer: null,
-  connection: null,
-  isHost: null,
+  myPeerId: null,
+  myColor: PLAYER_COLORS[0],
+  /* 'idle' — офлайн, 'host' — принимаем подключения, 'client' — подключены к хосту */
+  role: 'idle',
+  localCar: null,
+  remoteCars: new Map(), // peerId -> car
+  hostConnections: new Map(), // peerId -> DataConnection (используется хостом)
+  hostConnection: null, // DataConnection до хоста (используется клиентом)
+  nextColorIndex: 1,
   lastStateSentAt: 0,
   lastCratesSentAt: 0,
   lastPingSentAt: 0,
   ping: null,
 };
+
+function assignNextColor() {
+  const color = PLAYER_COLORS[world.nextColorIndex % PLAYER_COLORS.length];
+  world.nextColorIndex += 1;
+  return color;
+}
+
+function isConnected() {
+  return world.role === 'host' ? world.hostConnections.size > 0 : world.role === 'client' && !!(world.hostConnection && world.hostConnection.open);
+}
+
+function rebuildCarsList() {
+  world.cars = world.localCar ? [world.localCar, ...world.remoteCars.values()] : [...world.remoteCars.values()];
+}
 
 const input = {
   left: false,
@@ -145,14 +169,14 @@ function seedClouds() {
   }
 }
 
-function createCar(x, y, angle, color, isPlayer = false) {
+function createCar(x, y, angle, color, isPlayer = false, peerId = null) {
   return {
     x, y, vx: 0, vy: 0, angle,
     targetX: x, targetY: y, targetAngle: angle,
     buffer: [],
     boostFxTimer: 0,
     radius: isPlayer ? 18 : 16,
-    color, isPlayer, boostTimer: 0,
+    color, isPlayer, peerId, boostTimer: 0,
   };
 }
 
@@ -165,8 +189,25 @@ function createCrate(x, y, size = 54, mass = 1.9) {
   };
 }
 
+/* Точки старта по номеру слота, чтобы игроки не спавнились друг на друге */
+const SPAWN_SLOTS = [
+  { x: 1000, y: 790, angle: -Math.PI / 2 },
+  { x: 1090, y: 680, angle: -Math.PI / 2 },
+  { x: 910, y: 680, angle: -Math.PI / 2 },
+  { x: 1090, y: 900, angle: -Math.PI / 2 },
+  { x: 910, y: 900, angle: -Math.PI / 2 },
+  { x: 1180, y: 790, angle: -Math.PI / 2 },
+  { x: 820, y: 790, angle: -Math.PI / 2 },
+  { x: 1000, y: 620, angle: -Math.PI / 2 },
+];
+
+function spawnSlotFor(index) {
+  return SPAWN_SLOTS[index % SPAWN_SLOTS.length];
+}
+
 function createPlayer() {
-  return createCar(1000, 790, -Math.PI / 2, '#7ef0a5', true);
+  const slot = spawnSlotFor(0);
+  return createCar(slot.x, slot.y, slot.angle, world.myColor, true, world.myPeerId);
 }
 
 function seedCrates() {
@@ -180,43 +221,54 @@ function seedCrates() {
   ];
 }
 
-function getRemoteCar() {
-  return world.cars.find((car) => !car.isPlayer) || null;
+function getCarByPeerId(peerId) {
+  return world.remoteCars.get(peerId) || null;
 }
 
-function ensureRemoteCar() {
-  if (!getRemoteCar()) {
-    world.cars.push(createCar(1090, 680, -Math.PI / 2, '#7dd9ff', false));
+function addRemoteCar(peerId, color, x, y, angle) {
+  let car = world.remoteCars.get(peerId);
+  if (!car) {
+    const slot = spawnSlotFor(world.remoteCars.size + 1);
+    car = createCar(
+      typeof x === 'number' ? x : slot.x,
+      typeof y === 'number' ? y : slot.y,
+      typeof angle === 'number' ? angle : slot.angle,
+      color,
+      false,
+      peerId
+    );
+    world.remoteCars.set(peerId, car);
+    rebuildCarsList();
   }
   refreshOpponentStatus();
+  return car;
 }
 
-function removeRemoteCar() {
-  world.cars = world.cars.filter((car) => car.isPlayer);
-  refreshOpponentStatus();
+function removeCarByPeerId(peerId) {
+  if (world.remoteCars.delete(peerId)) {
+    rebuildCarsList();
+    refreshOpponentStatus();
+  }
 }
 
 function refreshOpponentStatus() {
-  const opponents = world.cars.filter((car) => !car.isPlayer);
-  if (world.connection && world.connection.open) {
+  const count = world.remoteCars.size;
+  if (world.role === 'host') {
+    setStatusText(enemyLabel, count ? `в игре: ${count + 1}` : 'ждём игроков…');
+  } else if (world.role === 'client' && isConnected()) {
     const pingTxt = world.ping != null ? ` · ${world.ping} ms` : '';
-    setStatusText(
-      enemyLabel,
-      `${opponents.length ? 'соперник online' : 'соперник…'}${pingTxt}`
-    );
+    setStatusText(enemyLabel, `в игре: ${count + 1}${pingTxt}`);
   } else {
-    setStatusText(enemyLabel, 'нет соперника');
+    setStatusText(enemyLabel, 'нет соперников');
   }
 }
 
 function resetRace() {
-  const player = createPlayer();
-  world.cars = [player];
+  const slot = spawnSlotFor(0);
+  world.localCar = createCar(slot.x, slot.y, slot.angle, world.myColor, true, world.myPeerId);
+  rebuildCarsList();
   world.particles = [];
   if (!world.crates.length) seedCrates();
-  if (world.connection && world.connection.open) {
-    ensureRemoteCar();
-  }
   setStatusText(modeLabel, 'Свободный заезд');
   setStatusText(islandLabel, 'Готов');
   refreshOpponentStatus();
@@ -234,7 +286,7 @@ function getIslandBounds() {
 
 /* ---------- Камера ---------- */
 function setCamera() {
-  const player = world.cars.find((car) => car.isPlayer);
+  const player = world.localCar;
   if (!player) return;
 
   const maxX = Math.max(0, world.width - view.width);
@@ -251,9 +303,35 @@ function keepCarsInsideWorld() {
   }
 }
 
+function sendToConn(conn, type, payload) {
+  if (!conn || !conn.open) return;
+  try {
+    conn.send(JSON.stringify({ type, payload, ts: Date.now() }));
+  } catch (error) {
+    console.warn('Send error', error);
+  }
+}
+
+/* Хост -> все клиенты (опционально кроме одного — для релея) */
+function broadcastFromHost(type, payload, exceptPeerId = null) {
+  for (const [peerId, conn] of world.hostConnections) {
+    if (peerId === exceptPeerId) continue;
+    sendToConn(conn, type, payload);
+  }
+}
+
+/* Клиент -> хост */
+function sendToHost(type, payload) {
+  sendToConn(world.hostConnection, type, payload);
+}
+
+/* Универсальная отправка «своего» события всем остальным участникам комнаты */
 function sendPeerAction(type, payload) {
-  if (!world.connection || !world.connection.open) return;
-  world.connection.send(JSON.stringify({ type, payload, ts: Date.now() }));
+  if (world.role === 'host') {
+    broadcastFromHost(type, payload);
+  } else if (world.role === 'client') {
+    sendToHost(type, payload);
+  }
 }
 
 /* ---------- Вектор движения ---------- */
@@ -391,8 +469,7 @@ function handleCarInput(car, dt) {
 
 /* ---------- Физика коробок ---------- */
 function shouldSimulateCrates() {
-  if (!world.connection || !world.connection.open) return true;
-  return world.isHost === true;
+  return world.role !== 'client';
 }
 
 function simulateCrates(dt) {
@@ -461,7 +538,7 @@ function updateCrates(dt) {
   if (shouldSimulateCrates()) {
     simulateCrates(dt);
 
-    if (world.connection && world.connection.open && world.isHost) {
+    if (world.role === 'host' && world.hostConnections.size > 0) {
       const interval = 1000 / NET.cratesHz;
       if (performance.now() - world.lastCratesSentAt > interval) {
         sendCratesState();
@@ -498,12 +575,10 @@ function applyCratesState(payload, snap) {
   }
 }
 
-/* ---------- Сетевой соперник ---------- */
-function applyRemoteState(packet) {
-  if (!packet || !packet.payload) return;
-  const remoteCar = getRemoteCar() || ensureRemoteCar();
-  const { x, y, angle } = packet.payload;
+/* ---------- Сетевые соперники (N игроков) ---------- */
+function applyRemoteState(peerId, x, y, angle) {
   if (typeof x !== 'number' || typeof y !== 'number' || typeof angle !== 'number') return;
+  const remoteCar = getCarByPeerId(peerId) || addRemoteCar(peerId, assignNextColor(), x, y, angle);
 
   const now = performance.now();
   remoteCar.buffer.push({ x, y, angle, t: now });
@@ -511,12 +586,7 @@ function applyRemoteState(packet) {
   while (remoteCar.buffer.length > 60) remoteCar.buffer.shift();
 }
 
-function updateRemoteCars(dt) {
-  const remoteCar = getRemoteCar();
-  if (!remoteCar) return;
-
-  if (!world.connection || !world.connection.open) return;
-
+function updateOneRemoteCar(remoteCar, dt) {
   if (remoteCar.boostFxTimer > 0) {
     remoteCar.boostFxTimer = Math.max(0, remoteCar.boostFxTimer - dt);
   }
@@ -559,6 +629,13 @@ function updateRemoteCars(dt) {
   if (span > 0) {
     remoteCar.vx = ((b.x - a.x) / span) * 1000;
     remoteCar.vy = ((b.y - a.y) / span) * 1000;
+  }
+}
+
+function updateRemoteCars(dt) {
+  if (!isConnected()) return;
+  for (const remoteCar of world.remoteCars.values()) {
+    updateOneRemoteCar(remoteCar, dt);
   }
 }
 
@@ -641,7 +718,7 @@ function emitBoostFx(car) {
 }
 
 function broadcastBoost() {
-  sendPeerAction('boost', {});
+  sendPeerAction('boost', { peerId: world.myPeerId });
 }
 
 function broadcastReset() {
@@ -650,9 +727,9 @@ function broadcastReset() {
 
 /* ---------- Главный апдейт ---------- */
 function update(dt) {
-  if (!world.cars.length) resetRace();
+  if (!world.localCar) resetRace();
 
-  const player = world.cars[0];
+  const player = world.localCar;
   if (input.boost && player) {
     player.boostTimer = Math.max(player.boostTimer, 0.15);
   }
@@ -662,18 +739,18 @@ function update(dt) {
   updateRemoteCars(dt);
   resolveCarCollisions();
 
-  if (world.connection && world.connection.open) {
+  if (isConnected()) {
     const now = performance.now();
 
     if (now - world.lastStateSentAt > 1000 / NET.stateHz) {
       sendPeerAction('state', {
-        x: player.x, y: player.y, angle: player.angle,
+        peerId: world.myPeerId, x: player.x, y: player.y, angle: player.angle,
       });
       world.lastStateSentAt = now;
     }
 
-    if (now - world.lastPingSentAt > 1000 / NET.pingHz) {
-      sendPeerAction('ping', { t: now });
+    if (world.role === 'client' && now - world.lastPingSentAt > 1000 / NET.pingHz) {
+      sendToHost('ping', { t: now });
       world.lastPingSentAt = now;
     }
   }
@@ -871,6 +948,8 @@ function initPeer() {
   });
 
   world.peer.on('open', (id) => {
+    world.myPeerId = id;
+    world.localCar.peerId = id;
     peerIdEl.textContent = id;
     if (!peerInput.value.trim()) peerInput.value = id;
     networkStatusEl.textContent = 'готов';
@@ -882,9 +961,18 @@ function initPeer() {
     }
   });
 
+  // Кто-то подключается к нам: если мы ещё никого не хостим и сами
+  // ни к кому не подключены — становимся хостом комнаты. Если мы уже
+  // хост — просто принимаем ещё одного игрока.
   world.peer.on('connection', (conn) => {
-    attachConnection(conn);
-    networkStatusEl.textContent = 'подключение';
+    if (world.role === 'client') {
+      // Мы сами клиент чужой комнаты — этот ID не для подключения других.
+      conn.on('open', () => sendToConn(conn, 'error', { reason: 'not-a-host' }));
+      return;
+    }
+    world.role = 'host';
+    attachHostConnection(conn);
+    networkStatusEl.textContent = 'подключение…';
   });
 
   world.peer.on('error', (err) => {
@@ -902,33 +990,73 @@ function initPeer() {
   });
 }
 
-function attachConnection(conn) {
-  world.connection = conn;
-  refreshOpponentStatus();
+/* ---------- Хост: обслуживание одного подключившегося игрока ---------- */
+function attachHostConnection(conn) {
+  conn.on('open', () => {
+    const color = assignNextColor();
+    world.hostConnections.set(conn.peer, conn);
+    const newCar = addRemoteCar(conn.peer, color, undefined, undefined, undefined);
+
+    // Полный ростер (включая себя-хоста) — новому игроку, чтобы отрисовать всех сразу
+    const roster = [
+      { peerId: world.myPeerId, color: world.myColor, x: world.localCar.x, y: world.localCar.y, angle: world.localCar.angle },
+      ...[...world.remoteCars.values()]
+        .filter((car) => car.peerId !== conn.peer)
+        .map((car) => ({ peerId: car.peerId, color: car.color, x: car.x, y: car.y, angle: car.angle })),
+    ];
+
+    sendToConn(conn, 'welcome', { yourColor: color, players: roster, crates: cratesSnapshotPayload() });
+
+    // Остальным — что подключился новый игрок
+    broadcastFromHost('join', { peerId: conn.peer, color, x: newCar.x, y: newCar.y, angle: newCar.angle }, conn.peer);
+
+    networkStatusEl.textContent = 'подключено (хост)';
+    refreshOpponentStatus();
+  });
+
+  conn.on('error', (err) => {
+    console.warn('Connection error:', err);
+  });
+
+  conn.on('data', (payload) => handleIncomingData(payload, conn));
+
+  conn.on('close', () => {
+    world.hostConnections.delete(conn.peer);
+    removeCarByPeerId(conn.peer);
+    broadcastFromHost('leave', { peerId: conn.peer });
+    if (world.hostConnections.size === 0) {
+      networkStatusEl.textContent = 'ждём игроков';
+    }
+    refreshOpponentStatus();
+  });
+}
+
+/* ---------- Клиент: единственное подключение к хосту ---------- */
+function connectToPeer() {
+  const remoteId = peerInput.value.trim();
+  if (!remoteId || !world.peer) return;
+
+  if (isConnected()) {
+    disconnectFromRoom();
+    return;
+  }
+
+  world.role = 'client';
+  const conn = world.peer.connect(remoteId, {
+    reliable: true,
+    config: ICE_SERVERS,
+  });
+  world.hostConnection = conn;
+  networkStatusEl.textContent = 'подключение…';
 
   conn.on('open', () => {
-    const myId = (world.peer && world.peer.id) || '';
-    const theirId = conn.peer || '';
-    world.isHost = myId && theirId ? myId < theirId : false;
+    networkStatusEl.textContent = 'подключено';
+    refreshOpponentStatus();
 
-    networkStatusEl.textContent = world.isHost ? 'подключено (хост)' : 'подключено';
-
-    ensureRemoteCar();
-    sendPeerAction('hello', { ok: true });
-
-    if (world.isHost) {
-      sendCratesState();
-    }
-
-    // Диагностика ICE/PC
     const pc = conn.peerConnection;
     if (pc) {
-      pc.oniceconnectionstatechange = () => {
-        console.log('[ICE]', pc.iceConnectionState);
-      };
-      pc.onconnectionstatechange = () => {
-        console.log('[PC]', pc.connectionState);
-      };
+      pc.oniceconnectionstatechange = () => console.log('[ICE]', pc.iceConnectionState);
+      pc.onconnectionstatechange = () => console.log('[PC]', pc.connectionState);
     }
   });
 
@@ -937,86 +1065,109 @@ function attachConnection(conn) {
     networkStatusEl.textContent = 'соединение оборвалось';
   });
 
-  conn.on('data', (payload) => {
-    try {
-      const packet = typeof payload === 'string' ? JSON.parse(payload) : payload;
-      if (!packet) return;
-
-      if (packet.type === 'hello') {
-        ensureRemoteCar();
-        if (world.isHost && world.connection && world.connection.open) {
-          sendCratesState();
-        }
-        return;
-      }
-
-      if (packet.type === 'state') {
-        applyRemoteState(packet);
-        return;
-      }
-
-      if (packet.type === 'crates') {
-        if (!world.isHost) {
-          applyCratesState(packet.payload, false);
-        }
-        return;
-      }
-
-      if (packet.type === 'boost') {
-        emitBoostFx(getRemoteCar());
-        return;
-      }
-
-      if (packet.type === 'reset') {
-        resetRace();
-        return;
-      }
-
-      if (packet.type === 'ping') {
-        sendPeerAction('pong', { t: packet.payload && packet.payload.t });
-        return;
-      }
-
-      if (packet.type === 'pong') {
-        const sentAt = packet.payload && packet.payload.t;
-        if (typeof sentAt === 'number') {
-          world.ping = Math.max(1, Math.round(performance.now() - sentAt));
-          refreshOpponentStatus();
-        }
-        return;
-      }
-    } catch (error) {
-      console.warn('Peer message error', error);
-    }
-  });
+  conn.on('data', (payload) => handleIncomingData(payload, conn));
 
   conn.on('close', () => {
-    world.connection = null;
-    world.isHost = null;
-    world.ping = null;
-    networkStatusEl.textContent = 'ожидание';
-    removeRemoteCar();
-    for (const crate of world.crates) {
-      crate.targetX = crate.x;
-      crate.targetY = crate.y;
-    }
+    disconnectFromRoom();
   });
 }
 
-function connectToPeer() {
-  const remoteId = peerInput.value.trim();
-  if (!remoteId || !world.peer) return;
-
-  if (world.connection && world.connection.open) {
-    world.connection.close();
-    return;
+function disconnectFromRoom() {
+  if (world.hostConnection) {
+    try { world.hostConnection.close(); } catch (e) { /* ignore */ }
   }
+  world.hostConnection = null;
+  world.role = 'idle';
+  world.ping = null;
+  world.remoteCars.clear();
+  rebuildCarsList();
+  networkStatusEl.textContent = 'ожидание';
+  for (const crate of world.crates) {
+    crate.targetX = crate.x;
+    crate.targetY = crate.y;
+  }
+  refreshOpponentStatus();
+}
 
-  const conn = world.peer.connect(remoteId, {
-    reliable: true,
-    config: ICE_SERVERS,
-  });
-  attachConnection(conn);
+function cratesSnapshotPayload() {
+  return { list: world.crates.map((c) => ({ x: c.x, y: c.y, vx: c.vx, vy: c.vy })) };
+}
+
+/* ---------- Общий разбор входящих сообщений (и хост, и клиент) ---------- */
+function handleIncomingData(payload, fromConn) {
+  try {
+    const packet = typeof payload === 'string' ? JSON.parse(payload) : payload;
+    if (!packet || !packet.type) return;
+    const { type, payload: data } = packet;
+
+    if (type === 'welcome') {
+      // Только клиент получает welcome — от хоста, сразу после подключения
+      world.myColor = data.yourColor;
+      world.localCar.color = data.yourColor;
+      for (const p of data.players || []) {
+        addRemoteCar(p.peerId, p.color, p.x, p.y, p.angle);
+      }
+      if (data.crates) applyCratesState(data.crates, true);
+      refreshOpponentStatus();
+      return;
+    }
+
+    if (type === 'join') {
+      addRemoteCar(data.peerId, data.color, data.x, data.y, data.angle);
+      return;
+    }
+
+    if (type === 'leave') {
+      removeCarByPeerId(data.peerId);
+      return;
+    }
+
+    if (type === 'state') {
+      applyRemoteState(data.peerId, data.x, data.y, data.angle);
+      if (world.role === 'host') {
+        // Ретранслируем позицию этого игрока всем остальным клиентам
+        broadcastFromHost('state', data, data.peerId);
+      }
+      return;
+    }
+
+    if (type === 'crates') {
+      if (world.role !== 'host') applyCratesState(data, false);
+      return;
+    }
+
+    if (type === 'boost') {
+      emitBoostFx(getCarByPeerId(data.peerId));
+      if (world.role === 'host') {
+        broadcastFromHost('boost', data, data.peerId);
+      }
+      return;
+    }
+
+    if (type === 'reset') {
+      resetRace();
+      if (world.role === 'host') {
+        broadcastFromHost('reset', {}, fromConn ? fromConn.peer : null);
+      }
+      return;
+    }
+
+    if (type === 'ping') {
+      sendToConn(fromConn, 'pong', { t: data && data.t });
+      return;
+    }
+
+    if (type === 'pong') {
+      const sentAt = data && data.t;
+      if (typeof sentAt === 'number') {
+        world.ping = Math.max(1, Math.round(performance.now() - sentAt));
+        refreshOpponentStatus();
+      }
+      return;
+    }
+  } catch (error) {
+    console.warn('Peer message error', error);
+  }
 }
 
 /* ---------- Джойстик ---------- */
@@ -1065,7 +1216,7 @@ window.addEventListener('keyup', (event) => {
 
 /* ---------- Кнопки ---------- */
 function triggerBoost() {
-  const player = world.cars[0];
+  const player = world.localCar;
   if (!player) return;
   player.vx += Math.cos(player.angle) * 160;
   player.vy += Math.sin(player.angle) * 160;
