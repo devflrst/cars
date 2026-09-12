@@ -11,9 +11,7 @@ const islandLabel = document.getElementById('island-label');
 const enemyLabel = document.getElementById('enemy-label');
 
 function setStatusText(element, value) {
-  if (element) {
-    element.textContent = value;
-  }
+  if (element) element.textContent = value;
 }
 
 const resetBtn = document.getElementById('reset-btn');
@@ -23,7 +21,6 @@ const mobileBoostBtn = document.getElementById('mobile-boost-btn');
 const joystickBase = document.getElementById('joystick-base');
 const joystickKnob = document.getElementById('joystick-knob');
 
-/* Логический размер вьюпорта (CSS-пиксели) и DPR для чёткой картинки */
 const view = { width: 960, height: 620, dpr: 1 };
 
 const settings = {
@@ -36,11 +33,7 @@ const world = {
   width: 2000,
   height: 1600,
   camera: { x: 0, y: 0 },
-  island: {
-    x: 1000,
-    y: 800,
-    size: 1760,
-  },
+  island: { x: 1000, y: 800, size: 1760 },
   clouds: [],
   cars: [],
   crates: [],
@@ -58,17 +51,13 @@ const input = {
   boost: false,
 };
 
-const mobileInput = {
-  x: 0,
-  y: 0,
-  active: false,
-};
+const mobileInput = { x: 0, y: 0, active: false };
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-/* ---- Подгонка канваса под контейнер с учётом devicePixelRatio ---- */
+/* ---------- Подгонка канваса под контейнер ---------- */
 function resizeCanvas() {
   const parent = canvas.parentElement;
   if (!parent) return;
@@ -91,8 +80,7 @@ function resizeCanvas() {
   view.dpr = dpr;
 }
 
-/* ---------------------- Игровые сущности ---------------------- */
-
+/* ---------- Сущности ---------- */
 function createCloud(x, y, scale, speed) {
   return { x, y, scale, speed, offset: Math.random() * Math.PI * 2 };
 }
@@ -113,28 +101,14 @@ function seedClouds() {
 
 function createCar(x, y, angle, color, isPlayer = false) {
   return {
-    x,
-    y,
-    vx: 0,
-    vy: 0,
-    angle,
+    x, y, vx: 0, vy: 0, angle,
     radius: isPlayer ? 18 : 16,
-    color,
-    isPlayer,
-    boostTimer: 0,
+    color, isPlayer, boostTimer: 0,
   };
 }
 
 function createCrate(x, y, size = 54, mass = 1.9) {
-  return {
-    x,
-    y,
-    size,
-    mass,
-    vx: 0,
-    vy: 0,
-    color: '#a86a3d',
-  };
+  return { x, y, size, mass, vx: 0, vy: 0, color: '#a86a3d' };
 }
 
 function createPlayer() {
@@ -158,8 +132,7 @@ function getRemoteCar() {
 
 function ensureRemoteCar() {
   if (!getRemoteCar()) {
-    const remote = createCar(1090, 680, -Math.PI / 2, '#7dd9ff', false);
-    world.cars.push(remote);
+    world.cars.push(createCar(1090, 680, -Math.PI / 2, '#7dd9ff', false));
   }
   refreshOpponentStatus();
 }
@@ -176,16 +149,13 @@ function refreshOpponentStatus() {
     : world.connection && world.connection.open
       ? '1 соперник'
       : '0 соперников';
-
   setStatusText(enemyLabel, text);
 }
 
 function resetRace() {
   world.cars = [createPlayer()];
   world.particles = [];
-  if (!world.crates.length) {
-    seedCrates();
-  }
+  if (!world.crates.length) seedCrates();
   setStatusText(modeLabel, 'Свободный заезд');
   setStatusText(islandLabel, 'Готов');
   refreshOpponentStatus();
@@ -201,7 +171,7 @@ function getIslandBounds() {
   };
 }
 
-/* Камера следует за игроком (важно для мобильных экранов) */
+/* ---------- Камера следует за игроком ---------- */
 function setCamera() {
   const player = world.cars.find((car) => car.isPlayer);
   if (!player) return;
@@ -209,11 +179,8 @@ function setCamera() {
   const maxX = Math.max(0, world.width - view.width);
   const maxY = Math.max(0, world.height - view.height);
 
-  const targetX = player.x - view.width / 2;
-  const targetY = player.y - view.height / 2;
-
-  world.camera.x = clamp(targetX, 0, maxX);
-  world.camera.y = clamp(targetY, 0, maxY);
+  world.camera.x = clamp(player.x - view.width / 2, 0, maxX);
+  world.camera.y = clamp(player.y - view.height / 2, 0, maxY);
 }
 
 function keepCarsInsideWorld() {
@@ -228,15 +195,12 @@ function sendPeerAction(type, payload) {
   world.connection.send(JSON.stringify({ type, payload, ts: Date.now() }));
 }
 
-/* ------------------------- Джойстик ------------------------- */
-
+/* ---------- Джойстик ---------- */
 function updateJoystickState() {
   if (!joystickBase || !joystickKnob) return;
-
   const radius = joystickBase.clientWidth * 0.3;
   const knobX = clamp(mobileInput.x * radius, -radius, radius);
   const knobY = clamp(mobileInput.y * radius, -radius, radius);
-
   joystickKnob.style.transform = `translate(${knobX}px, ${knobY}px)`;
 }
 
@@ -263,13 +227,10 @@ function resetJoystick() {
   mobileInput.x = 0;
   mobileInput.y = 0;
   mobileInput.active = false;
-  if (joystickKnob) {
-    joystickKnob.style.transform = 'translate(0, 0)';
-  }
+  if (joystickKnob) joystickKnob.style.transform = 'translate(0, 0)';
 }
 
-/* ------------------------- Физика ------------------------- */
-
+/* ---------- Физика машины ---------- */
 function handleCarInput(car, dt) {
   if (!car) return;
 
@@ -293,16 +254,12 @@ function handleCarInput(car, dt) {
   if (mobileInput.y > 0.2) throttle -= 0.7;
   throttle = clamp(throttle, -0.7, 1);
 
-  if (steer !== 0) {
-    car.angle += steer * turnStrength * dt;
-  }
+  if (steer !== 0) car.angle += steer * turnStrength * dt;
 
   if (throttle !== 0) {
-    const forwardX = Math.cos(car.angle);
-    const forwardY = Math.sin(car.angle);
     const desiredAccel = throttle > 0 ? accel : reverseAccel;
-    car.vx += forwardX * desiredAccel * throttle * dt;
-    car.vy += forwardY * desiredAccel * throttle * dt;
+    car.vx += Math.cos(car.angle) * desiredAccel * throttle * dt;
+    car.vy += Math.sin(car.angle) * desiredAccel * throttle * dt;
   }
 
   if (input.boost && car.isPlayer) {
@@ -342,16 +299,13 @@ function handleCarInput(car, dt) {
     world.particles.push({
       x: car.x - Math.cos(car.angle) * 17,
       y: car.y - Math.sin(car.angle) * 17,
-      life: 18,
-      maxLife: 18,
+      life: 18, maxLife: 18,
       color: car.color,
       r: car.radius * 0.45,
     });
   }
 
-  if (world.particles.length > 220) {
-    world.particles.shift();
-  }
+  if (world.particles.length > 220) world.particles.shift();
 }
 
 function updateCrates(dt) {
@@ -398,8 +352,8 @@ function updateCrates(dt) {
         }
 
         const boxAccel = Math.min(160, Math.hypot(car.vx, car.vy) * 0.5);
-        crate.vx += nx * boxAccel * 0.02 / crate.mass;
-        crate.vy += ny * boxAccel * 0.02 / crate.mass;
+        crate.vx += (nx * boxAccel * 0.02) / crate.mass;
+        crate.vy += (ny * boxAccel * 0.02) / crate.mass;
       }
     }
   }
@@ -407,10 +361,8 @@ function updateCrates(dt) {
 
 function applyRemoteState(packet) {
   if (!packet || !packet.payload) return;
-
   const remoteCar = getRemoteCar() || ensureRemoteCar();
   const { x, y, angle, vx, vy } = packet.payload;
-
   if (typeof x === 'number') remoteCar.x = x;
   if (typeof y === 'number') remoteCar.y = y;
   if (typeof angle === 'number') remoteCar.angle = angle;
@@ -434,7 +386,7 @@ function updateRemoteCars(dt) {
     remoteCar.angle += diff * 0.9 * dt * 2.4;
   }
 
-  const drift = Math.sin((performance.now() * 0.001) + 2) * 0.3;
+  const drift = Math.sin(performance.now() * 0.001 + 2) * 0.3;
   remoteCar.vx += Math.cos(remoteCar.angle + drift) * 65 * dt;
   remoteCar.vy += Math.sin(remoteCar.angle + drift) * 65 * dt;
 
@@ -471,18 +423,16 @@ function updateRemoteCars(dt) {
 }
 
 function updateParticles(dt) {
-  world.particles = world.particles.filter((particle) => particle.life > 0);
-  for (const particle of world.particles) {
-    particle.life -= dt * 60;
-    particle.x += (Math.random() - 0.5) * 0.5;
-    particle.y += (Math.random() - 0.5) * 0.5;
+  world.particles = world.particles.filter((p) => p.life > 0);
+  for (const p of world.particles) {
+    p.life -= dt * 60;
+    p.x += (Math.random() - 0.5) * 0.5;
+    p.y += (Math.random() - 0.5) * 0.5;
   }
 }
 
 function update(dt) {
-  if (!world.cars.length) {
-    resetRace();
-  }
+  if (!world.cars.length) resetRace();
 
   const player = world.cars[0];
   if (input.boost && player) {
@@ -495,18 +445,14 @@ function update(dt) {
 
   if (world.connection && world.connection.open && performance.now() - world.lastStateSentAt > 80) {
     sendPeerAction('state', {
-      x: player.x,
-      y: player.y,
+      x: player.x, y: player.y,
       angle: player.angle,
-      vx: player.vx,
-      vy: player.vy,
+      vx: player.vx, vy: player.vy,
     });
     world.lastStateSentAt = performance.now();
   }
 
-  if (player && player.boostTimer > 0) {
-    player.boostTimer -= dt;
-  }
+  if (player && player.boostTimer > 0) player.boostTimer -= dt;
 
   updateParticles(dt);
   keepCarsInsideWorld();
@@ -520,8 +466,7 @@ function update(dt) {
   }
 }
 
-/* ------------------------ Отрисовка ------------------------ */
-
+/* ---------- Отрисовка ---------- */
 function drawSky() {
   const gradient = ctx.createLinearGradient(0, 0, 0, view.height);
   gradient.addColorStop(0, '#7fbdf8');
@@ -533,7 +478,7 @@ function drawSky() {
   if (settings.clouds) {
     for (const cloud of world.clouds) {
       const x = ((cloud.x - world.camera.x * cloud.speed * 0.2) % (view.width + 220)) - 110;
-      const y = cloud.y + Math.sin((performance.now() * 0.00027) + cloud.offset) * 12;
+      const y = cloud.y + Math.sin(performance.now() * 0.00027 + cloud.offset) * 12;
       const w = 70 * cloud.scale;
       const h = 28 * cloud.scale;
 
@@ -549,7 +494,6 @@ function drawSky() {
 
 function drawIsland() {
   ctx.save();
-
   const islandX = world.island.x - world.camera.x;
   const islandY = world.island.y - world.camera.y;
   const size = world.island.size;
@@ -590,11 +534,9 @@ function drawCrates() {
     ctx.save();
     ctx.fillStyle = '#a3703d';
     ctx.fillRect(x, y, s, s);
-
     ctx.strokeStyle = '#5d3418';
     ctx.lineWidth = 3;
     ctx.strokeRect(x + 2, y + 2, s - 4, s - 4);
-
     ctx.fillStyle = 'rgba(255,255,255,0.08)';
     ctx.fillRect(x + 6, y + 6, s - 12, s - 12);
     ctx.restore();
@@ -602,13 +544,11 @@ function drawCrates() {
 }
 
 function drawParticles() {
-  for (const particle of world.particles) {
-    const alpha = clamp(particle.life / particle.maxLife, 0, 1);
-    const x = particle.x - world.camera.x;
-    const y = particle.y - world.camera.y;
+  for (const p of world.particles) {
+    const alpha = clamp(p.life / p.maxLife, 0, 1);
     ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
     ctx.beginPath();
-    ctx.arc(x, y, particle.r, 0, Math.PI * 2);
+    ctx.arc(p.x - world.camera.x, p.y - world.camera.y, p.r, 0, Math.PI * 2);
     ctx.fill();
   }
 }
@@ -640,26 +580,19 @@ function drawWorld() {
   drawSky();
   drawIsland();
   drawCrates();
-
-  for (const car of world.cars) {
-    drawCar(car);
-  }
-
+  for (const car of world.cars) drawCar(car);
   drawParticles();
 }
 
 function loop(ts) {
   const dt = Math.min(0.033, (ts - (loop.lastTime || ts)) / 1000 || 0.016);
   loop.lastTime = ts;
-
   update(dt);
   drawWorld();
-
   requestAnimationFrame(loop);
 }
 
-/* --------------------------- PeerJS --------------------------- */
-
+/* ---------- PeerJS ---------- */
 function getConnectLink(peerId) {
   const url = new URL(window.location.href);
   url.searchParams.set('connect', peerId);
@@ -673,9 +606,7 @@ function getLinkConnectTarget() {
 }
 
 function initPeer() {
-  if (world.peer) {
-    world.peer.destroy();
-  }
+  if (world.peer) world.peer.destroy();
 
   world.peer = new Peer(undefined, {
     host: '0.peerjs.com',
@@ -686,9 +617,7 @@ function initPeer() {
 
   world.peer.on('open', (id) => {
     peerIdEl.textContent = id;
-    if (!peerInput.value.trim()) {
-      peerInput.value = id;
-    }
+    if (!peerInput.value.trim()) peerInput.value = id;
     networkStatusEl.textContent = 'готов';
 
     const connectTarget = getLinkConnectTarget();
@@ -723,16 +652,8 @@ function attachConnection(conn) {
     try {
       const packet = typeof payload === 'string' ? JSON.parse(payload) : payload;
       if (!packet) return;
-
-      if (packet.type === 'hello') {
-        ensureRemoteCar();
-        return;
-      }
-
-      if (packet.type === 'state') {
-        applyRemoteState(packet);
-        return;
-      }
+      if (packet.type === 'hello') { ensureRemoteCar(); return; }
+      if (packet.type === 'state') { applyRemoteState(packet); return; }
     } catch (error) {
       console.warn('Peer message error', error);
     }
@@ -758,16 +679,11 @@ function connectToPeer() {
   attachConnection(conn);
 }
 
-/* ------------------------ Джойстик (события) ------------------------ */
-
+/* ---------- События джойстика ---------- */
 if (joystickBase) {
   joystickBase.addEventListener('pointerdown', (event) => {
     event.preventDefault();
-    try {
-      joystickBase.setPointerCapture(event.pointerId);
-    } catch (e) {
-      /* игнорируем */
-    }
+    try { joystickBase.setPointerCapture(event.pointerId); } catch (e) { /* ignore */ }
     handleJoystickPointer(event);
   });
 
@@ -788,24 +704,18 @@ if (joystickBase) {
   joystickBase.addEventListener('lostpointercapture', stop);
 }
 
-/* ------------------------ Клавиатура ------------------------ */
-
+/* ---------- Клавиатура ---------- */
 window.addEventListener('keydown', (event) => {
   const key = event.key.toLowerCase();
-
   if (key === 'w' || key === 'arrowup') input.up = true;
   if (key === 's' || key === 'arrowdown') input.down = true;
   if (key === 'a' || key === 'arrowleft') input.left = true;
   if (key === 'd' || key === 'arrowright') input.right = true;
-  if (key === ' ') {
-    input.boost = true;
-    event.preventDefault();
-  }
+  if (key === ' ') { input.boost = true; event.preventDefault(); }
 });
 
 window.addEventListener('keyup', (event) => {
   const key = event.key.toLowerCase();
-
   if (key === 'w' || key === 'arrowup') input.up = false;
   if (key === 's' || key === 'arrowdown') input.down = false;
   if (key === 'a' || key === 'arrowleft') input.left = false;
@@ -813,8 +723,7 @@ window.addEventListener('keyup', (event) => {
   if (key === ' ') input.boost = false;
 });
 
-/* ------------------------ Кнопки ------------------------ */
-
+/* ---------- Кнопки ---------- */
 function triggerBoost() {
   const player = world.cars[0];
   if (!player) return;
@@ -823,39 +732,43 @@ function triggerBoost() {
   player.boostTimer = 0.4;
 }
 
-resetBtn.addEventListener('click', () => {
-  resetRace();
-  setCamera();
-});
+if (resetBtn) {
+  resetBtn.addEventListener('click', () => {
+    resetRace();
+    setCamera();
+  });
+}
 
-connectBtn.addEventListener('click', () => {
-  connectToPeer();
-});
+if (connectBtn) {
+  connectBtn.addEventListener('click', () => connectToPeer());
+}
 
-copyLinkBtn.addEventListener('click', async () => {
-  const id = peerIdEl.textContent && peerIdEl.textContent !== 'offline' ? peerIdEl.textContent : '';
-  if (!id) {
-    networkStatusEl.textContent = 'сначала дождитесь ID';
-    return;
-  }
+if (copyLinkBtn) {
+  copyLinkBtn.addEventListener('click', async () => {
+    const id = peerIdEl.textContent && peerIdEl.textContent !== 'offline' ? peerIdEl.textContent : '';
+    if (!id) {
+      networkStatusEl.textContent = 'сначала дождитесь ID';
+      return;
+    }
+    const shareLink = getConnectLink(id);
+    try {
+      await navigator.clipboard.writeText(shareLink);
+      networkStatusEl.textContent = 'ссылка скопирована';
+    } catch (error) {
+      const tempInput = document.createElement('input');
+      tempInput.value = shareLink;
+      document.body.appendChild(tempInput);
+      tempInput.select();
+      document.execCommand('copy');
+      tempInput.remove();
+      networkStatusEl.textContent = 'ссылка скопирована';
+    }
+  });
+}
 
-  const shareLink = getConnectLink(id);
-
-  try {
-    await navigator.clipboard.writeText(shareLink);
-    networkStatusEl.textContent = 'ссылка скопирована';
-  } catch (error) {
-    const tempInput = document.createElement('input');
-    tempInput.value = shareLink;
-    document.body.appendChild(tempInput);
-    tempInput.select();
-    document.execCommand('copy');
-    tempInput.remove();
-    networkStatusEl.textContent = 'ссылка скопирована';
-  }
-});
-
-boostBtn.addEventListener('click', triggerBoost);
+if (boostBtn) {
+  boostBtn.addEventListener('click', triggerBoost);
+}
 
 if (mobileBoostBtn) {
   mobileBoostBtn.addEventListener('pointerdown', (event) => {
@@ -864,14 +777,22 @@ if (mobileBoostBtn) {
   });
 }
 
-/* -------------------- Изменение размера -------------------- */
-
-function handleResize() {
-  resizeCanvas();
-}
-
-window.addEventListener('resize', handleResize);
-window.addEventListener('orientationchange', () => setTimeout(handleResize, 150));
+/* ---------- Resize ---------- */
+window.addEventListener('resize', resizeCanvas);
+window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 150));
 
 if (typeof ResizeObserver !== 'undefined') {
-  const ro = new ResizeObserver(() =>
+  const ro = new ResizeObserver(() => resizeCanvas());
+  ro.observe(canvas.parentElement);
+}
+
+/* ---------- Старт ---------- */
+resizeCanvas();
+seedClouds();
+seedCrates();
+resetRace();
+initPeer();
+resizeCanvas();
+update(0.016);
+drawWorld();
+requestAnimationFrame(loop);
