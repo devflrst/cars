@@ -44,6 +44,9 @@ const NET = {
   pingHz: 1,
   remoteInterpDelay: 100,
   boostFxDuration: 0.35,
+  /* Мягкая коррекция коробок у клиента: ~86% расхождения за секунду */
+  crateReconcileRate: 2.5,
+  crateSnapThresholdSq: 200 * 200,
 };
 
 /* ---------- ICE: STUN + TURN ---------- */
@@ -467,11 +470,12 @@ function handleCarInput(car, dt) {
   if (world.particles.length > 220) world.particles.shift();
 }
 
-/* ---------- Физика коробок ---------- */
-function shouldSimulateCrates() {
-  return world.role !== 'client';
-}
-
+/* ---------- Физика коробок ----------
+ * Важно: коробки симулируются ЛОКАЛЬНО у всех участников (и у хоста, и у клиентов),
+ * чтобы толчок от собственной машины отрабатывался мгновенно, без задержки сети.
+ * Хост остаётся источником истины и 20 раз/сек рассылает авторитетную позицию.
+ * Клиент мягко подтягивает свои коробки к присланной цели (reconcileCrates).
+ */
 function simulateCrates(dt) {
   for (const crate of world.crates) {
     crate.vx *= 0.94;
@@ -521,32 +525,46 @@ function simulateCrates(dt) {
       }
     }
 
-    crate.targetX = crate.x;
-    crate.targetY = crate.y;
-  }
-}
-
-function interpolateCrates(dt) {
-  const t = 1 - Math.exp(-16 * dt);
-  for (const crate of world.crates) {
-    crate.x += (crate.targetX - crate.x) * t;
-    crate.y += (crate.targetY - crate.y) * t;
+    // targetX/targetY НЕ трогаем здесь — их обновляет только applyCratesState (хост->клиент).
   }
 }
 
 function updateCrates(dt) {
-  if (shouldSimulateCrates()) {
-    simulateCrates(dt);
+  // Все участники симулируют коробки локально — мгновенная реакция на свою машину.
+  simulateCrates(dt);
 
-    if (world.role === 'host' && world.hostConnections.size > 0) {
+  if (world.role === 'host') {
+    if (world.hostConnections.size > 0) {
       const interval = 1000 / NET.cratesHz;
       if (performance.now() - world.lastCratesSentAt > interval) {
         sendCratesState();
         world.lastCratesSentAt = performance.now();
       }
     }
-  } else {
-    interpolateCrates(dt);
+  } else if (world.role === 'client') {
+    // Мягко подтягиваем коробки к авторитетной позиции хоста.
+    reconcileCrates(dt);
+  }
+}
+
+function reconcileCrates(dt) {
+  const k = 1 - Math.exp(-NET.crateReconcileRate * dt);
+  const snapSq = NET.crateSnapThresholdSq;
+
+  for (const crate of world.crates) {
+    const dx = crate.targetX - crate.x;
+    const dy = crate.targetY - crate.y;
+    const distSq = dx * dx + dy * dy;
+
+    // Большой разрыв (реконнект, потеря пакетов) — жёсткий snap.
+    if (distSq > snapSq) {
+      crate.x = crate.targetX;
+      crate.y = crate.targetY;
+      continue;
+    }
+
+    crate.x += dx * k;
+    crate.y += dy * k;
   }
 }
 
@@ -565,13 +583,16 @@ function applyCratesState(payload, snap) {
     if (typeof src.x !== 'number' || typeof src.y !== 'number') continue;
 
     if (snap) {
+      // Первичная синхронизация (welcome): ставим точно и подхватываем скорость.
       dst.x = src.x;
       dst.y = src.y;
+      if (typeof src.vx === 'number') dst.vx = src.vx;
+      if (typeof src.vy === 'number') dst.vy = src.vy;
     }
+
+    // Всегда храним авторитетную цель для мягкой коррекции.
     dst.targetX = src.x;
     dst.targetY = src.y;
-    if (typeof src.vx === 'number') dst.vx = src.vx;
-    if (typeof src.vy === 'number') dst.vy = src.vy;
   }
 }
 
@@ -1132,6 +1153,8 @@ function handleIncomingData(payload, fromConn) {
     }
 
     if (type === 'crates') {
+      // Авторитетная позиция от хоста — обновляем target, мягкую коррекцию
+      // выполнит reconcileCrates в updateCrates().
       if (world.role !== 'host') applyCratesState(data, false);
       return;
     }
