@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sky Island Drift</title>
+    <meta
+      name="description"
+      content="Top-down sky island racing with free-driving cars."
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <div class="background-orb orb-one" aria-hidden="true"></div>
+      <div class="background-orb orb-two" aria-hidden="true"></div>
+
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="brand-mark">S</div>
+          <div>
+            <p class="eyebrow">sky island</p>
+            <h1>Sky Drift</h1>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <button id="copy-link-btn" class="ghost-button" type="button">Скопировать ссылку</button>
+          <button id="reset-btn" class="ghost-button" type="button">Сбросить</button>
+          <button id="boost-btn" class="solid-button" type="button">Буст</button>
+        </div>
+      </header>
+
+      <main class="game-layout">
+        <aside class="panel side-panel">
+          <section class="panel-card">
+            <p class="label">Пир-пир</p>
+            <div class="stat-row id-row">
+              <span>Ваш ID</span>
+              <strong id="peer-id">offline</strong>
+            </div>
+            <div class="network-row">
+              <input id="peer-input" type="text" placeholder="Введите ID друга" />
+              <button id="connect-btn" class="solid-button" type="button">Подключить</button>
+            </div>
+            <div class="stat-row">
+              <span>Статус</span>
+              <strong id="network-status">ожидание</strong>
+            </div>
+          </section>
+
+        </aside>
+
+        <section class="game-panel">
+          <div class="board-wrap">
+            <canvas id="game-canvas" width="960" height="620" aria-label="Игровая зона"></canvas>
+            <div class="mobile-controls" aria-label="Джойстик">
+              <div class="joystick-base" id="joystick-base">
+                <div class="joystick-knob" id="joystick-knob"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="script.js"></script>
+  </body>
+</html>
