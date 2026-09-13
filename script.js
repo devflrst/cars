@@ -22,52 +22,32 @@ const joystickKnob = document.getElementById('joystick-knob');
 
 const view = { width: 960, height: 620, dpr: 1 };
 
-/* Кэш неба (пересобирается только при ресайзе) */
 let skyGradient = null;
 let skyGradientHeight = -1;
 
-/* Офскрин-рендер острова: рисуем один раз, дальше просто blit со сдвигом камеры */
 const islandCanvas = document.createElement('canvas');
 const islandCtx = islandCanvas.getContext('2d');
 let islandBaked = false;
 
-const settings = {
-  glow: true,
-  clouds: true,
-  trails: true,
-};
+const settings = { glow: true, clouds: true, trails: true };
 
 const NET = {
   stateHz: 60,
   cratesHz: 20,
   pingHz: 1,
   remoteInterpDelay: 100,
-  /* Мягкая коррекция коробок у клиента: ~86% расхождения за секунду */
   crateReconcileRate: 2.5,
   crateSnapThresholdSq: 200 * 200,
 };
 
-/* ---------- ICE: STUN + TURN ---------- */
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
-    {
-      urls: 'turn:openrelay.metered.ca:80',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
+    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
   ],
   iceCandidatePoolSize: 10,
 };
@@ -75,32 +55,14 @@ const ICE_SERVERS = {
 const PLAYER_COLORS = ['#7ef0a5', '#7dd9ff', '#ffd884', '#ff8bb6', '#c792ea', '#f4a261', '#8ee4af', '#f28fad'];
 const MAX_PLAYERS = PLAYER_COLORS.length;
 
-/* ---------- Трасса (замкнутый контур по опорным точкам) ---------- */
 const TRACK_CONTROL_POINTS = [
-  { x: 750, y: 370 },
-  { x: 1150, y: 310 },
-  { x: 1550, y: 370 },
-  { x: 1800, y: 570 },
-  { x: 1910, y: 900 },
-  { x: 1770, y: 1200 },
-  { x: 1450, y: 1300 },
-  { x: 1550, y: 1550 },
-  { x: 1250, y: 1650 },
-  { x: 1000, y: 1500 },
-  { x: 1100, y: 1270 },
-  { x: 850, y: 1100 },
-  { x: 550, y: 1150 },
-  { x: 370, y: 900 },
-  { x: 410, y: 600 },
-  { x: 600, y: 400 },
+  { x: 750, y: 370 }, { x: 1150, y: 310 }, { x: 1550, y: 370 }, { x: 1800, y: 570 },
+  { x: 1910, y: 900 }, { x: 1770, y: 1200 }, { x: 1450, y: 1300 }, { x: 1550, y: 1550 },
+  { x: 1250, y: 1650 }, { x: 1000, y: 1500 }, { x: 1100, y: 1270 }, { x: 850, y: 1100 },
+  { x: 550, y: 1150 }, { x: 370, y: 900 }, { x: 410, y: 600 }, { x: 600, y: 400 },
 ];
 
-const TRACK = {
-  width: 240,
-  controlPoints: TRACK_CONTROL_POINTS,
-  path: [],
-  startAngle: 0,
-};
+const TRACK = { width: 240, controlPoints: TRACK_CONTROL_POINTS, path: [], startAngle: 0 };
 
 function catmullRomPoint(p0, p1, p2, p3, t) {
   const t2 = t * t;
@@ -131,7 +93,6 @@ function buildTrackPath() {
   TRACK.startAngle = Math.atan2(b.y - a.y, b.x - a.x);
 }
 
-/* Ближайшая точка на замкнутом пути трассы к произвольной точке (x, y) */
 function nearestTrackPoint(x, y) {
   const path = TRACK.path;
   let best = null;
@@ -155,7 +116,6 @@ function nearestTrackPoint(x, y) {
   return best;
 }
 
-/* Удерживает машину/коробку в пределах полотна трассы, мягко отталкивая от бровки */
 function constrainToTrack(entity, halfSize, bounceFactor) {
   const info = nearestTrackPoint(entity.x, entity.y);
   const limit = TRACK.width / 2 - halfSize;
@@ -176,7 +136,6 @@ function constrainToTrack(entity, halfSize, bounceFactor) {
   }
 }
 
-/* Стартовые слоты строятся прямо на полотне трассы у линии старта */
 function buildSpawnSlots() {
   const base = TRACK.path[0];
   const angle = TRACK.startAngle;
@@ -211,7 +170,6 @@ const world = {
   peer: null,
   myPeerId: null,
   myColor: PLAYER_COLORS[0],
-  /* 'idle' — офлайн, 'host' — принимаем подключения, 'client' — подключены к хосту */
   role: 'idle',
   localCar: null,
   remoteCars: new Map(),
@@ -231,19 +189,18 @@ function assignNextColor() {
 }
 
 function isConnected() {
-  return world.role === 'host' ? world.hostConnections.size > 0 : world.role === 'client' && !!(world.hostConnection && world.hostConnection.open);
+  return world.role === 'host'
+    ? world.hostConnections.size > 0
+    : world.role === 'client' && !!(world.hostConnection && world.hostConnection.open);
 }
 
 function rebuildCarsList() {
-  world.cars = world.localCar ? [world.localCar, ...world.remoteCars.values()] : [...world.remoteCars.values()];
+  world.cars = world.localCar
+    ? [world.localCar, ...world.remoteCars.values()]
+    : [...world.remoteCars.values()];
 }
 
-const input = {
-  left: false,
-  right: false,
-  up: false,
-  down: false,
-};
+const input = { left: false, right: false, up: false, down: false };
 
 const mobileInput = { x: 0, y: 0, active: false, pointerId: null };
 const JOYSTICK_DRAG_RATIO = 0.34;
@@ -253,7 +210,6 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-/* ---------- Размер канваса ---------- */
 function resizeCanvas() {
   const parent = canvas.parentElement;
   if (!parent) return;
@@ -276,7 +232,6 @@ function resizeCanvas() {
   view.dpr = dpr;
 }
 
-/* ---------- Сущности ---------- */
 function createCloud(x, y, scale, speed) {
   return { x, y, scale, speed, offset: Math.random() * Math.PI * 2 };
 }
@@ -306,12 +261,7 @@ function createCar(x, y, angle, color, isPlayer = false, peerId = null) {
 }
 
 function createCrate(x, y, size = 54, mass = 1.9) {
-  return {
-    x, y, size, mass,
-    vx: 0, vy: 0,
-    targetX: x, targetY: y,
-    color: '#a86a3d',
-  };
+  return { x, y, size, mass, vx: 0, vy: 0, targetX: x, targetY: y, color: '#a86a3d' };
 }
 
 let SPAWN_SLOTS = [];
@@ -325,9 +275,8 @@ function createPlayer() {
   return createCar(slot.x, slot.y, slot.angle, world.myColor, true, world.myPeerId);
 }
 
-/* Коробки расставляются по полотну трассы через равные доли её длины.
- * Размер и масса — детерминированы от индекса, чтобы у всех пиров совпадали
- * (иначе локальные симуляции разъезжаются при столкновениях у бровки). */
+/* Размер и масса коробок детерминированы от индекса — у всех пиров одинаковые,
+ * иначе локальные симуляции разъезжаются при столкновениях у бровки. */
 function seedCrates() {
   const path = TRACK.path;
   const fractions = [0.14, 0.3, 0.44, 0.6, 0.76, 0.92];
@@ -359,8 +308,6 @@ function addRemoteCar(peerId, color, x, y, angle) {
     world.remoteCars.set(peerId, car);
     rebuildCarsList();
   } else if (color && car.color !== color) {
-    /* Авторитетный цвет (из welcome/join) может прийти позже, чем первое state —
-     * перезаписываем, чтобы не осталось случайного цвета из assignNextColor(). */
     car.color = color;
   }
   refreshOpponentStatus();
@@ -397,7 +344,6 @@ function resetRace() {
   refreshOpponentStatus();
 }
 
-/* ---------- Камера ---------- */
 function setCamera() {
   const player = world.localCar;
   if (!player) return;
@@ -437,14 +383,10 @@ function sendToHost(type, payload) {
 }
 
 function sendPeerAction(type, payload) {
-  if (world.role === 'host') {
-    broadcastFromHost(type, payload);
-  } else if (world.role === 'client') {
-    sendToHost(type, payload);
-  }
+  if (world.role === 'host') broadcastFromHost(type, payload);
+  else if (world.role === 'client') sendToHost(type, payload);
 }
 
-/* ---------- Вектор движения ---------- */
 function getMoveVector() {
   let x = 0;
   let y = 0;
@@ -460,10 +402,7 @@ function getMoveVector() {
   }
 
   const mag = Math.hypot(x, y);
-  if (mag > 1) {
-    x /= mag;
-    y /= mag;
-  }
+  if (mag > 1) { x /= mag; y /= mag; }
   return { x, y, mag: Math.min(mag, 1) };
 }
 
@@ -538,11 +477,8 @@ function handleCarInput(car, dt) {
     diff = Math.atan2(Math.sin(diff), Math.cos(diff));
 
     const maxTurn = turnRate * dt;
-    if (Math.abs(diff) <= maxTurn) {
-      car.angle = targetAngle;
-    } else {
-      car.angle += Math.sign(diff) * maxTurn;
-    }
+    if (Math.abs(diff) <= maxTurn) car.angle = targetAngle;
+    else car.angle += Math.sign(diff) * maxTurn;
 
     car.vx += move.x * accel * move.mag * dt;
     car.vy += move.y * accel * move.mag * dt;
@@ -745,12 +681,9 @@ function updateOneRemoteCar(remoteCar, dt) {
 
 function updateRemoteCars(dt) {
   if (!isConnected()) return;
-  for (const remoteCar of world.remoteCars.values()) {
-    updateOneRemoteCar(remoteCar, dt);
-  }
+  for (const remoteCar of world.remoteCars.values()) updateOneRemoteCar(remoteCar, dt);
 }
 
-/* ---------- Коллизия машин ---------- */
 function resolveCarCollisions() {
   const cars = world.cars;
   for (let i = 0; i < cars.length; i += 1) {
@@ -808,12 +741,10 @@ function updateParticles(dt) {
   particles.length = write;
 }
 
-/* ---------- Сетевые служебные события ---------- */
 function broadcastReset() {
   sendPeerAction('reset', {});
 }
 
-/* ---------- Главный апдейт ---------- */
 function update(dt) {
   if (!world.localCar) resetRace();
 
@@ -872,4 +803,539 @@ function drawSky() {
       ctx.beginPath();
       ctx.ellipse(x, y, w, h, 0, 0, Math.PI * 2);
       ctx.ellipse(x + w * 0.7, y - h * 0.2, w * 0.75, h * 0.8, 0, 0, Math.PI * 2);
-      ctx.ellipse(x - w * 0.7, y - h * 0.15, w * 0.68, h * 0
+      ctx.ellipse(x - w * 0.7, y - h * 0.15, w * 0.68, h * 0.7, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+const ISLAND_PAD = 32;
+
+function drawCheckeredLine(cx, cy, angle, width) {
+  const normal = { x: -Math.sin(angle), y: Math.cos(angle) };
+  const squares = 10;
+  const stripeThickness = 24;
+  const sq = width / squares;
+  const half = width / 2;
+
+  for (let i = 0; i < squares; i += 1) {
+    const t0 = -half + i * sq + sq / 2;
+    const px = cx + normal.x * t0;
+    const py = cy + normal.y * t0;
+    islandCtx.save();
+    islandCtx.translate(px, py);
+    islandCtx.rotate(angle);
+    islandCtx.fillStyle = i % 2 === 0 ? '#f4f8ff' : '#131922';
+    islandCtx.fillRect(-stripeThickness / 2, -sq / 2, stripeThickness, sq + 0.6);
+    islandCtx.restore();
+  }
+}
+
+function traceTrackPath() {
+  const path = TRACK.path;
+  islandCtx.beginPath();
+  islandCtx.moveTo(ISLAND_PAD + path[0].x, ISLAND_PAD + path[0].y);
+  for (let i = 1; i < path.length; i += 1) {
+    islandCtx.lineTo(ISLAND_PAD + path[i].x, ISLAND_PAD + path[i].y);
+  }
+  islandCtx.closePath();
+}
+
+function bakeIsland() {
+  if (!TRACK.path.length) buildTrackPath();
+
+  const canvasW = world.width + ISLAND_PAD * 2;
+  const canvasH = world.height + ISLAND_PAD * 2;
+  islandCanvas.width = canvasW;
+  islandCanvas.height = canvasH;
+
+  const cx = ISLAND_PAD;
+  const cy = ISLAND_PAD;
+
+  islandCtx.clearRect(0, 0, canvasW, canvasH);
+  islandCtx.save();
+
+  islandCtx.beginPath();
+  islandCtx.roundRect(cx, cy, world.width, world.height, 42);
+  islandCtx.fillStyle = '#5fc76f';
+  islandCtx.shadowColor = 'rgba(67, 184, 92, 0.7)';
+  islandCtx.shadowBlur = settings.glow ? 28 : 0;
+  islandCtx.fill();
+  islandCtx.shadowBlur = 0;
+
+  islandCtx.strokeStyle = 'rgba(18, 78, 26, 0.7)';
+  islandCtx.lineWidth = 5;
+  islandCtx.beginPath();
+  islandCtx.roundRect(cx, cy, world.width, world.height, 42);
+  islandCtx.stroke();
+
+  islandCtx.fillStyle = 'rgba(34, 104, 57, 0.16)';
+  for (let i = 0; i < 46; i += 1) {
+    const gx = cx + ((i * 137) % Math.floor(world.width - 40)) + 20;
+    const gy = cy + ((i * 251) % Math.floor(world.height - 40)) + 20;
+    islandCtx.fillRect(gx, gy, 16, 16);
+  }
+
+  traceTrackPath();
+  islandCtx.lineJoin = 'round';
+  islandCtx.lineCap = 'round';
+
+  islandCtx.lineWidth = TRACK.width + 26;
+  islandCtx.strokeStyle = '#eef3f6';
+  islandCtx.stroke();
+  islandCtx.setLineDash([34, 34]);
+  islandCtx.strokeStyle = '#d5473f';
+  islandCtx.stroke();
+  islandCtx.setLineDash([]);
+
+  traceTrackPath();
+  islandCtx.lineWidth = TRACK.width;
+  islandCtx.strokeStyle = '#32363e';
+  islandCtx.shadowColor = 'rgba(4, 10, 14, 0.5)';
+  islandCtx.shadowBlur = settings.glow ? 20 : 0;
+  islandCtx.stroke();
+  islandCtx.shadowBlur = 0;
+
+  traceTrackPath();
+  islandCtx.lineWidth = Math.max(8, TRACK.width - 40);
+  islandCtx.strokeStyle = 'rgba(255, 255, 255, 0.035)';
+  islandCtx.stroke();
+
+  traceTrackPath();
+  islandCtx.setLineDash([28, 24]);
+  islandCtx.lineWidth = 6;
+  islandCtx.strokeStyle = 'rgba(255, 214, 120, 0.85)';
+  islandCtx.stroke();
+  islandCtx.setLineDash([]);
+
+  const start = TRACK.path[0];
+  drawCheckeredLine(cx + start.x, cy + start.y, TRACK.startAngle, TRACK.width);
+
+  islandCtx.restore();
+  islandBaked = true;
+}
+
+function drawIsland() {
+  if (!islandBaked) bakeIsland();
+  const x = -world.camera.x - ISLAND_PAD;
+  const y = -world.camera.y - ISLAND_PAD;
+  ctx.drawImage(islandCanvas, x, y);
+}
+
+function drawCrates() {
+  for (const crate of world.crates) {
+    const x = crate.x - crate.size * 0.5 - world.camera.x;
+    const y = crate.y - crate.size * 0.5 - world.camera.y;
+    const s = crate.size;
+
+    ctx.save();
+    ctx.fillStyle = '#a3703d';
+    ctx.fillRect(x, y, s, s);
+    ctx.strokeStyle = '#5d3418';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x + 2, y + 2, s - 4, s - 4);
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(x + 6, y + 6, s - 12, s - 12);
+    ctx.restore();
+  }
+}
+
+function drawParticles() {
+  for (const p of world.particles) {
+    const alpha = clamp(p.life / p.maxLife, 0, 1);
+    ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+    ctx.beginPath();
+    ctx.arc(p.x - world.camera.x, p.y - world.camera.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawCar(car) {
+  const x = car.x - world.camera.x;
+  const y = car.y - world.camera.y;
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(car.angle);
+
+  ctx.shadowColor = settings.glow ? car.color : 'transparent';
+  ctx.shadowBlur = settings.glow ? 16 : 0;
+
+  ctx.fillStyle = car.color;
+  ctx.fillRect(-18, -10, 36, 20);
+  ctx.fillStyle = 'rgba(18, 26, 32, 0.75)';
+  ctx.fillRect(-10, -8, 20, 16);
+  ctx.fillStyle = '#f4f8ff';
+  ctx.fillRect(14, -4, 8, 8);
+  ctx.fillRect(-18, -9, 7, 5);
+  ctx.fillRect(-18, 4, 7, 5);
+
+  ctx.restore();
+}
+
+function drawWorld() {
+  drawSky();
+  drawIsland();
+  drawCrates();
+  for (const car of world.cars) drawCar(car);
+  drawParticles();
+}
+
+function loop(ts) {
+  const dt = Math.min(0.033, (ts - (loop.lastTime || ts)) / 1000 || 0.016);
+  loop.lastTime = ts;
+  update(dt);
+  drawWorld();
+  requestAnimationFrame(loop);
+}
+
+/* ---------- PeerJS ---------- */
+function getConnectLink(peerId) {
+  const url = new URL(window.location.href);
+  url.searchParams.set('connect', peerId);
+  url.hash = '';
+  return url.toString();
+}
+
+function getLinkConnectTarget() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('connect') || params.get('peer') || params.get('join') || '';
+}
+
+function initPeer() {
+  if (world.peer) world.peer.destroy();
+
+  world.peer = new Peer(undefined, {
+    host: '0.peerjs.com',
+    port: 443,
+    secure: true,
+    path: '/',
+    config: ICE_SERVERS,
+    debug: 1,
+  });
+
+  world.peer.on('open', (id) => {
+    world.myPeerId = id;
+    if (world.localCar) world.localCar.peerId = id;
+    peerIdEl.textContent = id;
+    if (!peerInput.value.trim()) peerInput.value = id;
+    networkStatusEl.textContent = 'готов';
+
+    const connectTarget = getLinkConnectTarget();
+    if (connectTarget && connectTarget !== id) {
+      peerInput.value = connectTarget;
+      connectToPeer();
+    }
+  });
+
+  world.peer.on('connection', (conn) => {
+    if (world.role === 'client') {
+      conn.on('open', () => sendToConn(conn, 'error', { reason: 'not-a-host' }));
+      return;
+    }
+    world.role = 'host';
+    attachHostConnection(conn);
+    networkStatusEl.textContent = 'подключение…';
+  });
+
+  world.peer.on('error', (err) => {
+    console.warn('Peer error:', err);
+    const t = err && err.type ? err.type : 'unknown';
+    if (t === 'peer-unavailable') networkStatusEl.textContent = 'ID не найден';
+    else if (t === 'network' || t === 'server-error' || t === 'socket-error') networkStatusEl.textContent = 'сервер сигнализации недоступен';
+    else if (t === 'unavailable-id') networkStatusEl.textContent = 'ID уже занят';
+    else networkStatusEl.textContent = `ошибка: ${t}`;
+  });
+}
+
+function attachHostConnection(conn) {
+  conn.on('open', () => {
+    const color = assignNextColor();
+    world.hostConnections.set(conn.peer, conn);
+    const newCar = addRemoteCar(conn.peer, color, undefined, undefined, undefined);
+
+    const roster = [
+      { peerId: world.myPeerId, color: world.myColor, x: world.localCar.x, y: world.localCar.y, angle: world.localCar.angle },
+      ...[...world.remoteCars.values()]
+        .filter((car) => car.peerId !== conn.peer)
+        .map((car) => ({ peerId: car.peerId, color: car.color, x: car.x, y: car.y, angle: car.angle })),
+    ];
+
+    sendToConn(conn, 'welcome', { yourColor: color, players: roster, crates: cratesSnapshotPayload() });
+    broadcastFromHost('join', { peerId: conn.peer, color, x: newCar.x, y: newCar.y, angle: newCar.angle }, conn.peer);
+
+    networkStatusEl.textContent = 'подключено (хост)';
+    refreshOpponentStatus();
+  });
+
+  conn.on('error', (err) => console.warn('Connection error:', err));
+  conn.on('data', (payload) => handleIncomingData(payload, conn));
+
+  conn.on('close', () => {
+    world.hostConnections.delete(conn.peer);
+    removeCarByPeerId(conn.peer);
+    broadcastFromHost('leave', { peerId: conn.peer });
+    if (world.hostConnections.size === 0) networkStatusEl.textContent = 'ждём игроков';
+    refreshOpponentStatus();
+  });
+}
+
+function connectToPeer() {
+  const remoteId = peerInput.value.trim();
+  if (!remoteId || !world.peer) return;
+
+  if (isConnected()) {
+    disconnectFromRoom();
+    return;
+  }
+
+  world.role = 'client';
+  const conn = world.peer.connect(remoteId, { reliable: true, config: ICE_SERVERS });
+  world.hostConnection = conn;
+  networkStatusEl.textContent = 'подключение…';
+
+  conn.on('open', () => {
+    networkStatusEl.textContent = 'подключено';
+    refreshOpponentStatus();
+
+    const pc = conn.peerConnection;
+    if (pc) {
+      pc.oniceconnectionstatechange = () => console.log('[ICE]', pc.iceConnectionState);
+      pc.onconnectionstatechange = () => console.log('[PC]', pc.connectionState);
+    }
+  });
+
+  conn.on('error', (err) => {
+    console.warn('Connection error:', err);
+    networkStatusEl.textContent = 'соединение оборвалось';
+  });
+
+  conn.on('data', (payload) => handleIncomingData(payload, conn));
+  conn.on('close', () => disconnectFromRoom());
+}
+
+function disconnectFromRoom() {
+  const conn = world.hostConnection;
+  world.hostConnection = null;
+  if (conn) {
+    try { conn.close(); } catch (e) { /* ignore */ }
+  }
+  world.role = 'idle';
+  world.ping = null;
+  world.remoteCars.clear();
+  rebuildCarsList();
+  networkStatusEl.textContent = 'ожидание';
+  for (const crate of world.crates) {
+    crate.targetX = crate.x;
+    crate.targetY = crate.y;
+  }
+  refreshOpponentStatus();
+}
+
+function cratesSnapshotPayload() {
+  return { list: world.crates.map((c) => ({ x: c.x, y: c.y, vx: c.vx, vy: c.vy })) };
+}
+
+function handleIncomingData(payload, fromConn) {
+  try {
+    const packet = typeof payload === 'string' ? JSON.parse(payload) : payload;
+    if (!packet || !packet.type) return;
+    const { type, payload: data } = packet;
+
+    if (type === 'welcome') {
+      world.myColor = data.yourColor;
+      if (world.localCar) world.localCar.color = data.yourColor;
+      for (const p of data.players || []) {
+        addRemoteCar(p.peerId, p.color, p.x, p.y, p.angle);
+      }
+      if (data.crates) applyCratesState(data.crates, true);
+      refreshOpponentStatus();
+      return;
+    }
+
+    if (type === 'join') {
+      addRemoteCar(data.peerId, data.color, data.x, data.y, data.angle);
+      return;
+    }
+
+    if (type === 'leave') {
+      removeCarByPeerId(data.peerId);
+      return;
+    }
+
+    if (type === 'state') {
+      // Хост доверяет fromConn.peer, а не self-reported peerId из payload.
+      const peerId = world.role === 'host' && fromConn ? fromConn.peer : data.peerId;
+      applyRemoteState(peerId, data.x, data.y, data.angle);
+      if (world.role === 'host') {
+        broadcastFromHost('state', { ...data, peerId }, peerId);
+      }
+      return;
+    }
+
+    if (type === 'crates') {
+      if (world.role !== 'host') applyCratesState(data, false);
+      return;
+    }
+
+    if (type === 'reset') {
+      resetRace();
+      if (world.role === 'host') broadcastFromHost('reset', {}, fromConn ? fromConn.peer : null);
+      return;
+    }
+
+    if (type === 'ping') {
+      sendToConn(fromConn, 'pong', { t: data && data.t });
+      return;
+    }
+
+    if (type === 'pong') {
+      const sentAt = data && data.t;
+      if (typeof sentAt === 'number') {
+        world.ping = Math.max(1, Math.round(performance.now() - sentAt));
+        refreshOpponentStatus();
+      }
+      return;
+    }
+  } catch (error) {
+    console.warn('Peer message error', error);
+  }
+}
+
+/* ---------- Джойстик: обработчики ---------- */
+if (joystickZone) {
+  // Без touch-action браузер отбирает жест под скролл и присылает pointercancel.
+  joystickZone.style.touchAction = 'none';
+  joystickZone.style.userSelect = 'none';
+  joystickZone.style.webkitUserSelect = 'none';
+  joystickZone.style.webkitTouchCallout = 'none';
+
+  const onPointerMove = (event) => {
+    if (!mobileInput.active || event.pointerId !== mobileInput.pointerId) return;
+    event.preventDefault();
+    updateJoystickFromPointer(event.clientX, event.clientY);
+  };
+
+  const detachWindowListeners = () => {
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', onPointerUp);
+    window.removeEventListener('pointercancel', onPointerUp);
+  };
+
+  const onPointerUp = (event) => {
+    if (event.pointerId !== mobileInput.pointerId) return;
+    event.preventDefault();
+    try { joystickZone.releasePointerCapture(event.pointerId); } catch (e) { /* ignore */ }
+    detachWindowListeners();
+    resetJoystick();
+  };
+
+  joystickZone.addEventListener('pointerdown', (event) => {
+    // Лечим залипание: если предыдущий палец не закрылся корректно,
+    // отдаём управление новому касанию.
+    if (mobileInput.active && mobileInput.pointerId !== event.pointerId) {
+      detachWindowListeners();
+      resetJoystick();
+    }
+    if (mobileInput.active) return;
+
+    event.preventDefault();
+    mobileInput.active = true;
+    mobileInput.pointerId = event.pointerId;
+
+    placeJoystickAt(event.clientX, event.clientY);
+    updateJoystickFromPointer(event.clientX, event.clientY);
+
+    try { joystickZone.setPointerCapture(event.pointerId); } catch (e) { /* ignore */ }
+
+    // Слушаем на window: события не теряются, когда палец уходит за границу зоны.
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onPointerUp, { passive: false });
+    window.addEventListener('pointercancel', onPointerUp, { passive: false });
+  }, { passive: false });
+
+  // Страховка от залипания при потере фокуса / сворачивании приложения.
+  const emergencyReset = () => {
+    if (!mobileInput.active) return;
+    detachWindowListeners();
+    resetJoystick();
+  };
+  window.addEventListener('blur', emergencyReset);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) emergencyReset();
+  });
+}
+
+/* ---------- Клавиатура ---------- */
+window.addEventListener('keydown', (event) => {
+  const key = event.key.toLowerCase();
+  if (key === 'w' || key === 'arrowup') input.up = true;
+  if (key === 's' || key === 'arrowdown') input.down = true;
+  if (key === 'a' || key === 'arrowleft') input.left = true;
+  if (key === 'd' || key === 'arrowright') input.right = true;
+});
+
+window.addEventListener('keyup', (event) => {
+  const key = event.key.toLowerCase();
+  if (key === 'w' || key === 'arrowup') input.up = false;
+  if (key === 's' || key === 'arrowdown') input.down = false;
+  if (key === 'a' || key === 'arrowleft') input.left = false;
+  if (key === 'd' || key === 'arrowright') input.right = false;
+});
+
+/* ---------- Кнопки ---------- */
+if (resetBtn) {
+  resetBtn.addEventListener('click', () => {
+    resetRace();
+    setCamera();
+    broadcastReset();
+  });
+}
+
+if (connectBtn) {
+  connectBtn.addEventListener('click', () => connectToPeer());
+}
+
+if (copyLinkBtn) {
+  copyLinkBtn.addEventListener('click', async () => {
+    const id = peerIdEl.textContent && peerIdEl.textContent !== 'offline' ? peerIdEl.textContent : '';
+    if (!id) {
+      networkStatusEl.textContent = 'сначала дождитесь ID';
+      return;
+    }
+    const shareLink = getConnectLink(id);
+    try {
+      await navigator.clipboard.writeText(shareLink);
+      networkStatusEl.textContent = 'ссылка скопирована';
+    } catch (error) {
+      const tempInput = document.createElement('input');
+      tempInput.value = shareLink;
+      document.body.appendChild(tempInput);
+      tempInput.select();
+      document.execCommand('copy');
+      tempInput.remove();
+      networkStatusEl.textContent = 'ссылка скопирована';
+    }
+  });
+}
+
+/* ---------- Resize ---------- */
+window.addEventListener('resize', resizeCanvas);
+window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 150));
+
+if (typeof ResizeObserver !== 'undefined') {
+  const ro = new ResizeObserver(() => resizeCanvas());
+  ro.observe(canvas.parentElement);
+}
+
+/* ---------- Старт ---------- */
+buildTrackPath();
+SPAWN_SLOTS = buildSpawnSlots();
+resizeCanvas();
+seedClouds();
+seedCrates();
+resetRace();
+initPeer();
+update(0.016);
+drawWorld();
+requestAnimationFrame(loop);
