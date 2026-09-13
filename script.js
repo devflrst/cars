@@ -45,7 +45,7 @@ const NET = {
 // его поддомен и API-ключ. Если оставить заглушки — код просто продолжит
 // работать на резервных бесплатных серверах (RELAY_SERVERS ниже).
 const METERED_APP = 'skyislanddrift';   // skyislanddrift.metered.live
-const METERED_API_KEY = 'XB2qbWxy2VDsEdF_pAsh9hm1uA8e9rdoIMC6a7-UPGTi-2j6';
+const METERED_API_KEY = '895fb285c1a9b6a25676049ec39f66bd1e58';
 
 let dynamicTurnServers = [];
 
