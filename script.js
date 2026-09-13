@@ -76,8 +76,6 @@ const PLAYER_COLORS = ['#7ef0a5', '#7dd9ff', '#ffd884', '#ff8bb6', '#c792ea', '#
 const MAX_PLAYERS = PLAYER_COLORS.length;
 
 /* ---------- Трасса (замкнутый контур по опорным точкам) ---------- */
-/* Опорные точки центральной линии трассы — форма петли с "S"-изгибом,
- * навеянная присланной схемой. Плотный путь строится сплайном Catmull-Rom. */
 const TRACK_CONTROL_POINTS = [
   { x: 750, y: 370 },
   { x: 1150, y: 310 },
@@ -216,9 +214,9 @@ const world = {
   /* 'idle' — офлайн, 'host' — принимаем подключения, 'client' — подключены к хосту */
   role: 'idle',
   localCar: null,
-  remoteCars: new Map(), // peerId -> car
-  hostConnections: new Map(), // peerId -> DataConnection (используется хостом)
-  hostConnection: null, // DataConnection до хоста (используется клиентом)
+  remoteCars: new Map(),
+  hostConnections: new Map(),
+  hostConnection: null,
   nextColorIndex: 1,
   lastStateSentAt: 0,
   lastCratesSentAt: 0,
@@ -248,7 +246,8 @@ const input = {
 };
 
 const mobileInput = { x: 0, y: 0, active: false, pointerId: null };
-const JOYSTICK_DRAG_RATIO = 0.34; // доля размера базы, на которую можно утянуть ручку
+const JOYSTICK_DRAG_RATIO = 0.34;
+const JOYSTICK_FALLBACK_SIZE = 118;
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -315,8 +314,6 @@ function createCrate(x, y, size = 54, mass = 1.9) {
   };
 }
 
-/* Точки старта по номеру слота, чтобы игроки не спавнились друг на друге.
- * Заполняется в buildSpawnSlots() после построения пути трассы. */
 let SPAWN_SLOTS = [];
 
 function spawnSlotFor(index) {
@@ -328,14 +325,18 @@ function createPlayer() {
   return createCar(slot.x, slot.y, slot.angle, world.myColor, true, world.myPeerId);
 }
 
-/* Коробки расставляются по полотну трассы через равные доли её длины */
+/* Коробки расставляются по полотну трассы через равные доли её длины.
+ * Размер и масса — детерминированы от индекса, чтобы у всех пиров совпадали
+ * (иначе локальные симуляции разъезжаются при столкновениях у бровки). */
 function seedCrates() {
   const path = TRACK.path;
   const fractions = [0.14, 0.3, 0.44, 0.6, 0.76, 0.92];
-  world.crates = fractions.map((f) => {
+  world.crates = fractions.map((f, i) => {
     const idx = Math.floor(f * path.length) % path.length;
     const p = path[idx];
-    return createCrate(p.x, p.y, 52 + Math.random() * 12, 1.9 + Math.random() * 0.5);
+    const size = 52 + ((i * 37) % 12);
+    const mass = 1.9 + ((i * 13) % 5) * 0.1;
+    return createCrate(p.x, p.y, size, mass);
   });
 }
 
@@ -357,6 +358,10 @@ function addRemoteCar(peerId, color, x, y, angle) {
     );
     world.remoteCars.set(peerId, car);
     rebuildCarsList();
+  } else if (color && car.color !== color) {
+    /* Авторитетный цвет (из welcome/join) может прийти позже, чем первое state —
+     * перезаписываем, чтобы не осталось случайного цвета из assignNextColor(). */
+    car.color = color;
   }
   refreshOpponentStatus();
   return car;
@@ -420,7 +425,6 @@ function sendToConn(conn, type, payload) {
   }
 }
 
-/* Хост -> все клиенты (опционально кроме одного — для релея) */
 function broadcastFromHost(type, payload, exceptPeerId = null) {
   for (const [peerId, conn] of world.hostConnections) {
     if (peerId === exceptPeerId) continue;
@@ -428,12 +432,10 @@ function broadcastFromHost(type, payload, exceptPeerId = null) {
   }
 }
 
-/* Клиент -> хост */
 function sendToHost(type, payload) {
   sendToConn(world.hostConnection, type, payload);
 }
 
-/* Универсальная отправка «своего» события всем остальным участникам комнаты */
 function sendPeerAction(type, payload) {
   if (world.role === 'host') {
     broadcastFromHost(type, payload);
@@ -465,17 +467,23 @@ function getMoveVector() {
   return { x, y, mag: Math.min(mag, 1) };
 }
 
-/* ---------- Джойстик (плавающий: появляется там, где коснулся палец) ---------- */
+/* ---------- Джойстик (плавающий) ---------- */
 let joystickOriginX = 0;
 let joystickOriginY = 0;
+
+function joystickBaseSize() {
+  if (!joystickBase) return JOYSTICK_FALLBACK_SIZE;
+  const w = joystickBase.clientWidth || joystickBase.offsetWidth;
+  return w > 0 ? w : JOYSTICK_FALLBACK_SIZE;
+}
 
 function placeJoystickAt(clientX, clientY) {
   if (!joystickZone || !joystickBase) return;
 
   const zoneRect = joystickZone.getBoundingClientRect();
-  const half = joystickBase.clientWidth / 2 || 59;
-  const localX = clamp(clientX - zoneRect.left, half, zoneRect.width - half);
-  const localY = clamp(clientY - zoneRect.top, half, zoneRect.height - half);
+  const half = joystickBaseSize() / 2;
+  const localX = clamp(clientX - zoneRect.left, half, Math.max(half, zoneRect.width - half));
+  const localY = clamp(clientY - zoneRect.top, half, Math.max(half, zoneRect.height - half));
 
   joystickOriginX = zoneRect.left + localX;
   joystickOriginY = zoneRect.top + localY;
@@ -488,7 +496,7 @@ function placeJoystickAt(clientX, clientY) {
 function updateJoystickFromPointer(clientX, clientY) {
   if (!joystickBase || !joystickKnob) return;
 
-  const maxDistance = joystickBase.clientWidth * JOYSTICK_DRAG_RATIO;
+  const maxDistance = Math.max(1, joystickBaseSize() * JOYSTICK_DRAG_RATIO);
   const dx = clientX - joystickOriginX;
   const dy = clientY - joystickOriginY;
   const distance = Math.min(Math.hypot(dx, dy), maxDistance);
@@ -573,12 +581,7 @@ function handleCarInput(car, dt) {
   if (world.particles.length > 220) world.particles.shift();
 }
 
-/* ---------- Физика коробок ----------
- * Важно: коробки симулируются ЛОКАЛЬНО у всех участников (и у хоста, и у клиентов),
- * чтобы толчок от собственной машины отрабатывался мгновенно, без задержки сети.
- * Хост остаётся источником истины и 20 раз/сек рассылает авторитетную позицию.
- * Клиент мягко подтягивает свои коробки к присланной цели (reconcileCrates).
- */
+/* ---------- Физика коробок ---------- */
 function simulateCrates(dt) {
   for (const crate of world.crates) {
     crate.vx *= 0.94;
@@ -621,13 +624,10 @@ function simulateCrates(dt) {
         crate.vy += (ny * boxAccel * 0.02) / crate.mass;
       }
     }
-
-    // targetX/targetY НЕ трогаем здесь — их обновляет только applyCratesState (хост->клиент).
   }
 }
 
 function updateCrates(dt) {
-  // Все участники симулируют коробки локально — мгновенная реакция на свою машину.
   simulateCrates(dt);
 
   if (world.role === 'host') {
@@ -639,7 +639,6 @@ function updateCrates(dt) {
       }
     }
   } else if (world.role === 'client') {
-    // Мягко подтягиваем коробки к авторитетной позиции хоста.
     reconcileCrates(dt);
   }
 }
@@ -653,7 +652,6 @@ function reconcileCrates(dt) {
     const dy = crate.targetY - crate.y;
     const distSq = dx * dx + dy * dy;
 
-    // Большой разрыв (реконнект, потеря пакетов) — жёсткий snap.
     if (distSq > snapSq) {
       crate.x = crate.targetX;
       crate.y = crate.targetY;
@@ -680,20 +678,18 @@ function applyCratesState(payload, snap) {
     if (typeof src.x !== 'number' || typeof src.y !== 'number') continue;
 
     if (snap) {
-      // Первичная синхронизация (welcome): ставим точно и подхватываем скорость.
       dst.x = src.x;
       dst.y = src.y;
       if (typeof src.vx === 'number') dst.vx = src.vx;
       if (typeof src.vy === 'number') dst.vy = src.vy;
     }
 
-    // Всегда храним авторитетную цель для мягкой коррекции.
     dst.targetX = src.x;
     dst.targetY = src.y;
   }
 }
 
-/* ---------- Сетевые соперники (N игроков) ---------- */
+/* ---------- Сетевые соперники ---------- */
 function applyRemoteState(peerId, x, y, angle) {
   if (typeof x !== 'number' || typeof y !== 'number' || typeof angle !== 'number') return;
   const remoteCar = getCarByPeerId(peerId) || addRemoteCar(peerId, assignNextColor(), x, y, angle);
@@ -701,7 +697,8 @@ function applyRemoteState(peerId, x, y, angle) {
   const now = performance.now();
   remoteCar.buffer.push({ x, y, angle, t: now });
 
-  while (remoteCar.buffer.length > 60) remoteCar.buffer.shift();
+  const maxBuffer = Math.ceil(NET.remoteInterpDelay / (1000 / NET.stateHz)) + 8;
+  while (remoteCar.buffer.length > maxBuffer) remoteCar.buffer.shift();
 }
 
 function updateOneRemoteCar(remoteCar, dt) {
@@ -850,9 +847,6 @@ function update(dt) {
   if (speedLabel && player) {
     speedLabel.textContent = `${Math.round(Math.hypot(player.vx, player.vy) * 0.6)} km/h`;
   }
-  if (modeLabel && player) {
-    modeLabel.textContent = 'Свободный заезд';
-  }
 }
 
 /* ---------- Рисование ---------- */
@@ -878,544 +872,4 @@ function drawSky() {
       ctx.beginPath();
       ctx.ellipse(x, y, w, h, 0, 0, Math.PI * 2);
       ctx.ellipse(x + w * 0.7, y - h * 0.2, w * 0.75, h * 0.8, 0, 0, Math.PI * 2);
-      ctx.ellipse(x - w * 0.7, y - h * 0.15, w * 0.68, h * 0.7, 0, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-}
-
-const ISLAND_PAD = 32; // запас под shadowBlur, чтобы тень не обрезалась
-
-/* Полосатая шашечная линия старта/финиша поперёк полотна трассы */
-function drawCheckeredLine(cx, cy, angle, width) {
-  const normal = { x: -Math.sin(angle), y: Math.cos(angle) };
-  const squares = 10;
-  const stripeThickness = 24;
-  const sq = width / squares;
-  const half = width / 2;
-
-  for (let i = 0; i < squares; i += 1) {
-    const t0 = -half + i * sq + sq / 2;
-    const px = cx + normal.x * t0;
-    const py = cy + normal.y * t0;
-    islandCtx.save();
-    islandCtx.translate(px, py);
-    islandCtx.rotate(angle);
-    islandCtx.fillStyle = i % 2 === 0 ? '#f4f8ff' : '#131922';
-    islandCtx.fillRect(-stripeThickness / 2, -sq / 2, stripeThickness, sq + 0.6);
-    islandCtx.restore();
-  }
-}
-
-function traceTrackPath() {
-  const path = TRACK.path;
-  islandCtx.beginPath();
-  islandCtx.moveTo(ISLAND_PAD + path[0].x, ISLAND_PAD + path[0].y);
-  for (let i = 1; i < path.length; i += 1) {
-    islandCtx.lineTo(ISLAND_PAD + path[i].x, ISLAND_PAD + path[i].y);
-  }
-  islandCtx.closePath();
-}
-
-function bakeIsland() {
-  if (!TRACK.path.length) buildTrackPath();
-
-  const canvasW = world.width + ISLAND_PAD * 2;
-  const canvasH = world.height + ISLAND_PAD * 2;
-  islandCanvas.width = canvasW;
-  islandCanvas.height = canvasH;
-
-  const cx = ISLAND_PAD;
-  const cy = ISLAND_PAD;
-
-  islandCtx.clearRect(0, 0, canvasW, canvasH);
-  islandCtx.save();
-
-  /* Трава по всей территории острова */
-  islandCtx.beginPath();
-  islandCtx.roundRect(cx, cy, world.width, world.height, 42);
-  islandCtx.fillStyle = '#5fc76f';
-  islandCtx.shadowColor = 'rgba(67, 184, 92, 0.7)';
-  islandCtx.shadowBlur = settings.glow ? 28 : 0;
-  islandCtx.fill();
-  islandCtx.shadowBlur = 0;
-
-  islandCtx.strokeStyle = 'rgba(18, 78, 26, 0.7)';
-  islandCtx.lineWidth = 5;
-  islandCtx.beginPath();
-  islandCtx.roundRect(cx, cy, world.width, world.height, 42);
-  islandCtx.stroke();
-
-  /* Лёгкая текстура травы */
-  islandCtx.fillStyle = 'rgba(34, 104, 57, 0.16)';
-  for (let i = 0; i < 46; i += 1) {
-    const gx = cx + ((i * 137) % Math.floor(world.width - 40)) + 20;
-    const gy = cy + ((i * 251) % Math.floor(world.height - 40)) + 20;
-    islandCtx.fillRect(gx, gy, 16, 16);
-  }
-
-  traceTrackPath();
-  islandCtx.lineJoin = 'round';
-  islandCtx.lineCap = 'round';
-
-  /* Бровка (бело-красный бордюр) под полотном */
-  islandCtx.lineWidth = TRACK.width + 26;
-  islandCtx.strokeStyle = '#eef3f6';
-  islandCtx.stroke();
-  islandCtx.setLineDash([34, 34]);
-  islandCtx.strokeStyle = '#d5473f';
-  islandCtx.stroke();
-  islandCtx.setLineDash([]);
-
-  /* Асфальт */
-  traceTrackPath();
-  islandCtx.lineWidth = TRACK.width;
-  islandCtx.strokeStyle = '#32363e';
-  islandCtx.shadowColor = 'rgba(4, 10, 14, 0.5)';
-  islandCtx.shadowBlur = settings.glow ? 20 : 0;
-  islandCtx.stroke();
-  islandCtx.shadowBlur = 0;
-
-  /* Мягкий блик по центру полотна */
-  traceTrackPath();
-  islandCtx.lineWidth = Math.max(8, TRACK.width - 40);
-  islandCtx.strokeStyle = 'rgba(255, 255, 255, 0.035)';
-  islandCtx.stroke();
-
-  /* Пунктирная осевая линия */
-  traceTrackPath();
-  islandCtx.setLineDash([28, 24]);
-  islandCtx.lineWidth = 6;
-  islandCtx.strokeStyle = 'rgba(255, 214, 120, 0.85)';
-  islandCtx.stroke();
-  islandCtx.setLineDash([]);
-
-  /* Шашечная линия старта/финиша */
-  const start = TRACK.path[0];
-  drawCheckeredLine(cx + start.x, cy + start.y, TRACK.startAngle, TRACK.width);
-
-  islandCtx.restore();
-  islandBaked = true;
-}
-
-function drawIsland() {
-  if (!islandBaked) bakeIsland();
-
-  const x = -world.camera.x - ISLAND_PAD;
-  const y = -world.camera.y - ISLAND_PAD;
-
-  ctx.drawImage(islandCanvas, x, y);
-}
-
-function drawCrates() {
-  for (const crate of world.crates) {
-    const x = crate.x - crate.size * 0.5 - world.camera.x;
-    const y = crate.y - crate.size * 0.5 - world.camera.y;
-    const s = crate.size;
-
-    ctx.save();
-    ctx.fillStyle = '#a3703d';
-    ctx.fillRect(x, y, s, s);
-    ctx.strokeStyle = '#5d3418';
-    ctx.lineWidth = 3;
-    ctx.strokeRect(x + 2, y + 2, s - 4, s - 4);
-    ctx.fillStyle = 'rgba(255,255,255,0.08)';
-    ctx.fillRect(x + 6, y + 6, s - 12, s - 12);
-    ctx.restore();
-  }
-}
-
-function drawParticles() {
-  for (const p of world.particles) {
-    const alpha = clamp(p.life / p.maxLife, 0, 1);
-    ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
-    ctx.beginPath();
-    ctx.arc(p.x - world.camera.x, p.y - world.camera.y, p.r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-}
-
-function drawCar(car) {
-  const x = car.x - world.camera.x;
-  const y = car.y - world.camera.y;
-
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(car.angle);
-
-  ctx.shadowColor = settings.glow ? car.color : 'transparent';
-  ctx.shadowBlur = settings.glow ? 16 : 0;
-
-  ctx.fillStyle = car.color;
-  ctx.fillRect(-18, -10, 36, 20);
-  ctx.fillStyle = 'rgba(18, 26, 32, 0.75)';
-  ctx.fillRect(-10, -8, 20, 16);
-  ctx.fillStyle = '#f4f8ff';
-  ctx.fillRect(14, -4, 8, 8);
-  ctx.fillRect(-18, -9, 7, 5);
-  ctx.fillRect(-18, 4, 7, 5);
-
-  ctx.restore();
-}
-
-function drawWorld() {
-  drawSky();
-  drawIsland();
-  drawCrates();
-  for (const car of world.cars) drawCar(car);
-  drawParticles();
-}
-
-function loop(ts) {
-  const dt = Math.min(0.033, (ts - (loop.lastTime || ts)) / 1000 || 0.016);
-  loop.lastTime = ts;
-  update(dt);
-  drawWorld();
-  requestAnimationFrame(loop);
-}
-
-/* ---------- PeerJS ---------- */
-function getConnectLink(peerId) {
-  const url = new URL(window.location.href);
-  url.searchParams.set('connect', peerId);
-  url.hash = '';
-  return url.toString();
-}
-
-function getLinkConnectTarget() {
-  const params = new URLSearchParams(window.location.search);
-  return params.get('connect') || params.get('peer') || params.get('join') || '';
-}
-
-function initPeer() {
-  if (world.peer) world.peer.destroy();
-
-  world.peer = new Peer(undefined, {
-    host: '0.peerjs.com',
-    port: 443,
-    secure: true,
-    path: '/',
-    config: ICE_SERVERS,
-    debug: 1,
-  });
-
-  world.peer.on('open', (id) => {
-    world.myPeerId = id;
-    world.localCar.peerId = id;
-    peerIdEl.textContent = id;
-    if (!peerInput.value.trim()) peerInput.value = id;
-    networkStatusEl.textContent = 'готов';
-
-    const connectTarget = getLinkConnectTarget();
-    if (connectTarget && connectTarget !== id) {
-      peerInput.value = connectTarget;
-      connectToPeer();
-    }
-  });
-
-  // Кто-то подключается к нам: если мы ещё никого не хостим и сами
-  // ни к кому не подключены — становимся хостом комнаты. Если мы уже
-  // хост — просто принимаем ещё одного игрока.
-  world.peer.on('connection', (conn) => {
-    if (world.role === 'client') {
-      // Мы сами клиент чужой комнаты — этот ID не для подключения других.
-      conn.on('open', () => sendToConn(conn, 'error', { reason: 'not-a-host' }));
-      return;
-    }
-    world.role = 'host';
-    attachHostConnection(conn);
-    networkStatusEl.textContent = 'подключение…';
-  });
-
-  world.peer.on('error', (err) => {
-    console.warn('Peer error:', err);
-    const t = err && err.type ? err.type : 'unknown';
-    if (t === 'peer-unavailable') {
-      networkStatusEl.textContent = 'ID не найден';
-    } else if (t === 'network' || t === 'server-error' || t === 'socket-error') {
-      networkStatusEl.textContent = 'сервер сигнализации недоступен';
-    } else if (t === 'unavailable-id') {
-      networkStatusEl.textContent = 'ID уже занят';
-    } else {
-      networkStatusEl.textContent = `ошибка: ${t}`;
-    }
-  });
-}
-
-/* ---------- Хост: обслуживание одного подключившегося игрока ---------- */
-function attachHostConnection(conn) {
-  conn.on('open', () => {
-    const color = assignNextColor();
-    world.hostConnections.set(conn.peer, conn);
-    const newCar = addRemoteCar(conn.peer, color, undefined, undefined, undefined);
-
-    // Полный ростер (включая себя-хоста) — новому игроку, чтобы отрисовать всех сразу
-    const roster = [
-      { peerId: world.myPeerId, color: world.myColor, x: world.localCar.x, y: world.localCar.y, angle: world.localCar.angle },
-      ...[...world.remoteCars.values()]
-        .filter((car) => car.peerId !== conn.peer)
-        .map((car) => ({ peerId: car.peerId, color: car.color, x: car.x, y: car.y, angle: car.angle })),
-    ];
-
-    sendToConn(conn, 'welcome', { yourColor: color, players: roster, crates: cratesSnapshotPayload() });
-
-    // Остальным — что подключился новый игрок
-    broadcastFromHost('join', { peerId: conn.peer, color, x: newCar.x, y: newCar.y, angle: newCar.angle }, conn.peer);
-
-    networkStatusEl.textContent = 'подключено (хост)';
-    refreshOpponentStatus();
-  });
-
-  conn.on('error', (err) => {
-    console.warn('Connection error:', err);
-  });
-
-  conn.on('data', (payload) => handleIncomingData(payload, conn));
-
-  conn.on('close', () => {
-    world.hostConnections.delete(conn.peer);
-    removeCarByPeerId(conn.peer);
-    broadcastFromHost('leave', { peerId: conn.peer });
-    if (world.hostConnections.size === 0) {
-      networkStatusEl.textContent = 'ждём игроков';
-    }
-    refreshOpponentStatus();
-  });
-}
-
-/* ---------- Клиент: единственное подключение к хосту ---------- */
-function connectToPeer() {
-  const remoteId = peerInput.value.trim();
-  if (!remoteId || !world.peer) return;
-
-  if (isConnected()) {
-    disconnectFromRoom();
-    return;
-  }
-
-  world.role = 'client';
-  const conn = world.peer.connect(remoteId, {
-    reliable: true,
-    config: ICE_SERVERS,
-  });
-  world.hostConnection = conn;
-  networkStatusEl.textContent = 'подключение…';
-
-  conn.on('open', () => {
-    networkStatusEl.textContent = 'подключено';
-    refreshOpponentStatus();
-
-    const pc = conn.peerConnection;
-    if (pc) {
-      pc.oniceconnectionstatechange = () => console.log('[ICE]', pc.iceConnectionState);
-      pc.onconnectionstatechange = () => console.log('[PC]', pc.connectionState);
-    }
-  });
-
-  conn.on('error', (err) => {
-    console.warn('Connection error:', err);
-    networkStatusEl.textContent = 'соединение оборвалось';
-  });
-
-  conn.on('data', (payload) => handleIncomingData(payload, conn));
-
-  conn.on('close', () => {
-    disconnectFromRoom();
-  });
-}
-
-function disconnectFromRoom() {
-  if (world.hostConnection) {
-    try { world.hostConnection.close(); } catch (e) { /* ignore */ }
-  }
-  world.hostConnection = null;
-  world.role = 'idle';
-  world.ping = null;
-  world.remoteCars.clear();
-  rebuildCarsList();
-  networkStatusEl.textContent = 'ожидание';
-  for (const crate of world.crates) {
-    crate.targetX = crate.x;
-    crate.targetY = crate.y;
-  }
-  refreshOpponentStatus();
-}
-
-function cratesSnapshotPayload() {
-  return { list: world.crates.map((c) => ({ x: c.x, y: c.y, vx: c.vx, vy: c.vy })) };
-}
-
-/* ---------- Общий разбор входящих сообщений (и хост, и клиент) ---------- */
-function handleIncomingData(payload, fromConn) {
-  try {
-    const packet = typeof payload === 'string' ? JSON.parse(payload) : payload;
-    if (!packet || !packet.type) return;
-    const { type, payload: data } = packet;
-
-    if (type === 'welcome') {
-      // Только клиент получает welcome — от хоста, сразу после подключения
-      world.myColor = data.yourColor;
-      world.localCar.color = data.yourColor;
-      for (const p of data.players || []) {
-        addRemoteCar(p.peerId, p.color, p.x, p.y, p.angle);
-      }
-      if (data.crates) applyCratesState(data.crates, true);
-      refreshOpponentStatus();
-      return;
-    }
-
-    if (type === 'join') {
-      addRemoteCar(data.peerId, data.color, data.x, data.y, data.angle);
-      return;
-    }
-
-    if (type === 'leave') {
-      removeCarByPeerId(data.peerId);
-      return;
-    }
-
-    if (type === 'state') {
-      applyRemoteState(data.peerId, data.x, data.y, data.angle);
-      if (world.role === 'host') {
-        // Ретранслируем позицию этого игрока всем остальным клиентам
-        broadcastFromHost('state', data, data.peerId);
-      }
-      return;
-    }
-
-    if (type === 'crates') {
-      // Авторитетная позиция от хоста — обновляем target, мягкую коррекцию
-      // выполнит reconcileCrates в updateCrates().
-      if (world.role !== 'host') applyCratesState(data, false);
-      return;
-    }
-
-    if (type === 'reset') {
-      resetRace();
-      if (world.role === 'host') {
-        broadcastFromHost('reset', {}, fromConn ? fromConn.peer : null);
-      }
-      return;
-    }
-
-    if (type === 'ping') {
-      sendToConn(fromConn, 'pong', { t: data && data.t });
-      return;
-    }
-
-    if (type === 'pong') {
-      const sentAt = data && data.t;
-      if (typeof sentAt === 'number') {
-        world.ping = Math.max(1, Math.round(performance.now() - sentAt));
-        refreshOpponentStatus();
-      }
-      return;
-    }
-  } catch (error) {
-    console.warn('Peer message error', error);
-  }
-}
-
-/* ---------- Джойстик: слушаем всю зону, а не маленький кружок базы ---------- */
-if (joystickZone) {
-  joystickZone.addEventListener('pointerdown', (event) => {
-    if (mobileInput.active) return; // уже ведём один палец — второй игнорируем
-    event.preventDefault();
-    try { joystickZone.setPointerCapture(event.pointerId); } catch (e) { /* ignore */ }
-
-    mobileInput.active = true;
-    mobileInput.pointerId = event.pointerId;
-    placeJoystickAt(event.clientX, event.clientY);
-    updateJoystickFromPointer(event.clientX, event.clientY);
-  });
-
-  joystickZone.addEventListener('pointermove', (event) => {
-    if (!mobileInput.active || event.pointerId !== mobileInput.pointerId) return;
-    event.preventDefault();
-    updateJoystickFromPointer(event.clientX, event.clientY);
-  });
-
-  const stop = (event) => {
-    if (event && event.pointerId !== mobileInput.pointerId) return;
-    if (event) event.preventDefault();
-    resetJoystick();
-  };
-
-  joystickZone.addEventListener('pointerup', stop);
-  joystickZone.addEventListener('pointercancel', stop);
-  joystickZone.addEventListener('lostpointercapture', stop);
-}
-
-/* ---------- Клавиатура ---------- */
-window.addEventListener('keydown', (event) => {
-  const key = event.key.toLowerCase();
-  if (key === 'w' || key === 'arrowup') input.up = true;
-  if (key === 's' || key === 'arrowdown') input.down = true;
-  if (key === 'a' || key === 'arrowleft') input.left = true;
-  if (key === 'd' || key === 'arrowright') input.right = true;
-});
-
-window.addEventListener('keyup', (event) => {
-  const key = event.key.toLowerCase();
-  if (key === 'w' || key === 'arrowup') input.up = false;
-  if (key === 's' || key === 'arrowdown') input.down = false;
-  if (key === 'a' || key === 'arrowleft') input.left = false;
-  if (key === 'd' || key === 'arrowright') input.right = false;
-});
-
-/* ---------- Кнопки ---------- */
-if (resetBtn) {
-  resetBtn.addEventListener('click', () => {
-    resetRace();
-    setCamera();
-    broadcastReset();
-  });
-}
-
-if (connectBtn) {
-  connectBtn.addEventListener('click', () => connectToPeer());
-}
-
-if (copyLinkBtn) {
-  copyLinkBtn.addEventListener('click', async () => {
-    const id = peerIdEl.textContent && peerIdEl.textContent !== 'offline' ? peerIdEl.textContent : '';
-    if (!id) {
-      networkStatusEl.textContent = 'сначала дождитесь ID';
-      return;
-    }
-    const shareLink = getConnectLink(id);
-    try {
-      await navigator.clipboard.writeText(shareLink);
-      networkStatusEl.textContent = 'ссылка скопирована';
-    } catch (error) {
-      const tempInput = document.createElement('input');
-      tempInput.value = shareLink;
-      document.body.appendChild(tempInput);
-      tempInput.select();
-      document.execCommand('copy');
-      tempInput.remove();
-      networkStatusEl.textContent = 'ссылка скопирована';
-    }
-  });
-}
-
-/* ---------- Resize ---------- */
-window.addEventListener('resize', resizeCanvas);
-window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 150));
-
-if (typeof ResizeObserver !== 'undefined') {
-  const ro = new ResizeObserver(() => resizeCanvas());
-  ro.observe(canvas.parentElement);
-}
-
-/* ---------- Старт ---------- */
-buildTrackPath();
-SPAWN_SLOTS = buildSpawnSlots();
-resizeCanvas();
-seedClouds();
-seedCrates();
-resetRace();
-initPeer();
-update(0.016);
-drawWorld();
-requestAnimationFrame(loop);
+      ctx.ellipse(x - w * 0.7, y - h * 0.15, w * 0.68, h * 0
