@@ -68,7 +68,7 @@ function buildIceConfig(forceRelayOnly) {
 }
 
 const ICE_SERVERS = buildIceConfig(false);
-const CONNECT_TIMEOUT_MS = 8000;
+const CONNECT_TIMEOUT_MS = 12000;
 
 const PLAYER_COLORS = ['#7ef0a5', '#7dd9ff', '#ffd884', '#ff8bb6', '#c792ea', '#f4a261', '#8ee4af', '#f28fad'];
 const MAX_PLAYERS = PLAYER_COLORS.length;
@@ -1099,6 +1099,7 @@ function attachHostConnection(conn) {
     broadcastFromHost('join', { peerId: conn.peer, color: color, x: newCar.x, y: newCar.y, angle: newCar.angle }, conn.peer);
 
     if (networkStatusEl) networkStatusEl.textContent = 'подключено (хост)';
+    reportConnectionKind(conn.peerConnection, networkStatusEl);
     refreshOpponentStatus();
   });
 
@@ -1112,6 +1113,32 @@ function attachHostConnection(conn) {
     if (world.hostConnections.size === 0 && networkStatusEl) networkStatusEl.textContent = 'ждём игроков';
     refreshOpponentStatus();
   });
+}
+
+function reportConnectionKind(pc, statusEl) {
+  if (!pc || !pc.getStats) return;
+  // Через ~1.5с после открытия соединения ICE уже выбрал финальную пару
+  // кандидатов — смотрим её тип, чтобы честно показать, как именно
+  // связались игроки (полезно для диагностики "вайфай + мобильный").
+  setTimeout(function () {
+    pc.getStats(null).then(function (stats) {
+      let pairId = null;
+      stats.forEach(function (s) {
+        if (s.type === 'transport' && s.selectedCandidatePairId) pairId = s.selectedCandidatePairId;
+        if (s.type === 'candidate-pair' && s.state === 'succeeded' && s.nominated) pairId = s.id;
+      });
+      let kind = null;
+      stats.forEach(function (s) {
+        if (s.id !== pairId || s.type !== 'candidate-pair') return;
+        const local = stats.get(s.localCandidateId);
+        const remote = stats.get(s.remoteCandidateId);
+        const lt = local && local.candidateType;
+        const rt = remote && remote.candidateType;
+        kind = (lt === 'relay' || rt === 'relay') ? 'через сервер' : 'напрямую';
+      });
+      if (kind && statusEl) statusEl.textContent = 'подключено (' + kind + ')';
+    }).catch(function () { /* ignore, не критично */ });
+  }, 1500);
 }
 
 function connectToPeer(forceRelayOnly) {
@@ -1167,6 +1194,7 @@ function connectToPeer(forceRelayOnly) {
         }
       };
       pc.onconnectionstatechange = function () { console.log('[PC]', pc.connectionState); };
+      reportConnectionKind(pc, networkStatusEl);
     }
   });
 
