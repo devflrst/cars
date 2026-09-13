@@ -195,9 +195,8 @@ function isConnected() {
 }
 
 function rebuildCarsList() {
-  world.cars = world.localCar
-    ? [world.localCar, ...world.remoteCars.values()]
-    : [...world.remoteCars.values()];
+  const remotes = Array.from(world.remoteCars.values());
+  world.cars = world.localCar ? [world.localCar].concat(remotes) : remotes;
 }
 
 const input = { left: false, right: false, up: false, down: false };
@@ -250,18 +249,27 @@ function seedClouds() {
   }
 }
 
-function createCar(x, y, angle, color, isPlayer = false, peerId = null) {
+function createCar(x, y, angle, color, isPlayer, peerId) {
   return {
-    x, y, vx: 0, vy: 0, angle,
+    x: x, y: y, vx: 0, vy: 0, angle: angle,
     targetX: x, targetY: y, targetAngle: angle,
     buffer: [],
     radius: isPlayer ? 18 : 16,
-    color, isPlayer, peerId,
+    color: color,
+    isPlayer: !!isPlayer,
+    peerId: peerId || null,
   };
 }
 
-function createCrate(x, y, size = 54, mass = 1.9) {
-  return { x, y, size, mass, vx: 0, vy: 0, targetX: x, targetY: y, color: '#a86a3d' };
+function createCrate(x, y, size, mass) {
+  return {
+    x: x, y: y,
+    size: size || 54,
+    mass: mass || 1.9,
+    vx: 0, vy: 0,
+    targetX: x, targetY: y,
+    color: '#a86a3d',
+  };
 }
 
 let SPAWN_SLOTS = [];
@@ -275,12 +283,12 @@ function createPlayer() {
   return createCar(slot.x, slot.y, slot.angle, world.myColor, true, world.myPeerId);
 }
 
-/* Размер и масса коробок детерминированы от индекса — у всех пиров одинаковые,
+/* Размер/масса коробок детерминированы от индекса — у всех пиров совпадают,
  * иначе локальные симуляции разъезжаются при столкновениях у бровки. */
 function seedCrates() {
   const path = TRACK.path;
   const fractions = [0.14, 0.3, 0.44, 0.6, 0.76, 0.92];
-  world.crates = fractions.map((f, i) => {
+  world.crates = fractions.map(function (f, i) {
     const idx = Math.floor(f * path.length) % path.length;
     const p = path[idx];
     const size = 52 + ((i * 37) % 12);
@@ -308,6 +316,8 @@ function addRemoteCar(peerId, color, x, y, angle) {
     world.remoteCars.set(peerId, car);
     rebuildCarsList();
   } else if (color && car.color !== color) {
+    /* Авторитетный цвет (welcome/join) может прийти позже, чем первое state —
+     * перезаписываем, чтобы не осталось случайного цвета. */
     car.color = color;
   }
   refreshOpponentStatus();
@@ -324,10 +334,10 @@ function removeCarByPeerId(peerId) {
 function refreshOpponentStatus() {
   const count = world.remoteCars.size;
   if (world.role === 'host') {
-    setStatusText(enemyLabel, count ? `в игре: ${count + 1}` : 'ждём игроков…');
+    setStatusText(enemyLabel, count ? 'в игре: ' + (count + 1) : 'ждём игроков…');
   } else if (world.role === 'client' && isConnected()) {
-    const pingTxt = world.ping != null ? ` · ${world.ping} ms` : '';
-    setStatusText(enemyLabel, `в игре: ${count + 1}${pingTxt}`);
+    const pingTxt = world.ping != null ? ' · ' + world.ping + ' ms' : '';
+    setStatusText(enemyLabel, 'в игре: ' + (count + 1) + pingTxt);
   } else {
     setStatusText(enemyLabel, 'нет соперников');
   }
@@ -365,14 +375,16 @@ function keepCarsInsideWorld() {
 function sendToConn(conn, type, payload) {
   if (!conn || !conn.open) return;
   try {
-    conn.send(JSON.stringify({ type, payload, ts: Date.now() }));
+    conn.send(JSON.stringify({ type: type, payload: payload, ts: Date.now() }));
   } catch (error) {
     console.warn('Send error', error);
   }
 }
 
-function broadcastFromHost(type, payload, exceptPeerId = null) {
-  for (const [peerId, conn] of world.hostConnections) {
+function broadcastFromHost(type, payload, exceptPeerId) {
+  for (const entry of world.hostConnections) {
+    const peerId = entry[0];
+    const conn = entry[1];
     if (peerId === exceptPeerId) continue;
     sendToConn(conn, type, payload);
   }
@@ -383,7 +395,7 @@ function sendToHost(type, payload) {
 }
 
 function sendPeerAction(type, payload) {
-  if (world.role === 'host') broadcastFromHost(type, payload);
+  if (world.role === 'host') broadcastFromHost(type, payload, null);
   else if (world.role === 'client') sendToHost(type, payload);
 }
 
@@ -403,7 +415,7 @@ function getMoveVector() {
 
   const mag = Math.hypot(x, y);
   if (mag > 1) { x /= mag; y /= mag; }
-  return { x, y, mag: Math.min(mag, 1) };
+  return { x: x, y: y, mag: Math.min(mag, 1) };
 }
 
 /* ---------- Джойстик (плавающий) ---------- */
@@ -427,8 +439,8 @@ function placeJoystickAt(clientX, clientY) {
   joystickOriginX = zoneRect.left + localX;
   joystickOriginY = zoneRect.top + localY;
 
-  joystickBase.style.left = `${localX}px`;
-  joystickBase.style.top = `${localY}px`;
+  joystickBase.style.left = localX + 'px';
+  joystickBase.style.top = localY + 'px';
   joystickBase.classList.add('is-active');
 }
 
@@ -446,7 +458,7 @@ function updateJoystickFromPointer(clientX, clientY) {
 
   const knobX = Math.cos(angle) * distance;
   const knobY = Math.sin(angle) * distance;
-  joystickKnob.style.transform = `translate(${knobX}px, ${knobY}px)`;
+  joystickKnob.style.transform = 'translate(' + knobX + 'px, ' + knobY + 'px)';
 }
 
 function resetJoystick() {
@@ -601,7 +613,9 @@ function reconcileCrates(dt) {
 
 function sendCratesState() {
   sendPeerAction('crates', {
-    list: world.crates.map((c) => ({ x: c.x, y: c.y, vx: c.vx, vy: c.vy })),
+    list: world.crates.map(function (c) {
+      return { x: c.x, y: c.y, vx: c.vx, vy: c.vy };
+    }),
   });
 }
 
@@ -631,13 +645,13 @@ function applyRemoteState(peerId, x, y, angle) {
   const remoteCar = getCarByPeerId(peerId) || addRemoteCar(peerId, assignNextColor(), x, y, angle);
 
   const now = performance.now();
-  remoteCar.buffer.push({ x, y, angle, t: now });
+  remoteCar.buffer.push({ x: x, y: y, angle: angle, t: now });
 
   const maxBuffer = Math.ceil(NET.remoteInterpDelay / (1000 / NET.stateHz)) + 8;
   while (remoteCar.buffer.length > maxBuffer) remoteCar.buffer.shift();
 }
 
-function updateOneRemoteCar(remoteCar, dt) {
+function updateOneRemoteCar(remoteCar) {
   const buf = remoteCar.buffer;
   if (buf.length === 0) return;
 
@@ -679,9 +693,9 @@ function updateOneRemoteCar(remoteCar, dt) {
   }
 }
 
-function updateRemoteCars(dt) {
+function updateRemoteCars() {
   if (!isConnected()) return;
-  for (const remoteCar of world.remoteCars.values()) updateOneRemoteCar(remoteCar, dt);
+  for (const remoteCar of world.remoteCars.values()) updateOneRemoteCar(remoteCar);
 }
 
 function resolveCarCollisions() {
@@ -752,7 +766,7 @@ function update(dt) {
 
   handleCarInput(player, dt);
   updateCrates(dt);
-  updateRemoteCars(dt);
+  updateRemoteCars();
   resolveCarCollisions();
 
   if (isConnected()) {
@@ -776,7 +790,7 @@ function update(dt) {
   setCamera();
 
   if (speedLabel && player) {
-    speedLabel.textContent = `${Math.round(Math.hypot(player.vx, player.vy) * 0.6)} km/h`;
+    speedLabel.textContent = Math.round(Math.hypot(player.vx, player.vy) * 0.6) + ' km/h';
   }
 }
 
@@ -943,7 +957,7 @@ function drawCrates() {
 function drawParticles() {
   for (const p of world.particles) {
     const alpha = clamp(p.life / p.maxLife, 0, 1);
-    ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+    ctx.fillStyle = 'rgba(255, 255, 255, ' + alpha + ')';
     ctx.beginPath();
     ctx.arc(p.x - world.camera.x, p.y - world.camera.y, p.r, 0, Math.PI * 2);
     ctx.fill();
@@ -1014,12 +1028,12 @@ function initPeer() {
     debug: 1,
   });
 
-  world.peer.on('open', (id) => {
+  world.peer.on('open', function (id) {
     world.myPeerId = id;
     if (world.localCar) world.localCar.peerId = id;
-    peerIdEl.textContent = id;
-    if (!peerInput.value.trim()) peerInput.value = id;
-    networkStatusEl.textContent = 'готов';
+    if (peerIdEl) peerIdEl.textContent = id;
+    if (peerInput && !peerInput.value.trim()) peerInput.value = id;
+    if (networkStatusEl) networkStatusEl.textContent = 'готов';
 
     const connectTarget = getLinkConnectTarget();
     if (connectTarget && connectTarget !== id) {
@@ -1028,54 +1042,56 @@ function initPeer() {
     }
   });
 
-  world.peer.on('connection', (conn) => {
+  world.peer.on('connection', function (conn) {
     if (world.role === 'client') {
-      conn.on('open', () => sendToConn(conn, 'error', { reason: 'not-a-host' }));
+      conn.on('open', function () { sendToConn(conn, 'error', { reason: 'not-a-host' }); });
       return;
     }
     world.role = 'host';
     attachHostConnection(conn);
-    networkStatusEl.textContent = 'подключение…';
+    if (networkStatusEl) networkStatusEl.textContent = 'подключение…';
   });
 
-  world.peer.on('error', (err) => {
+  world.peer.on('error', function (err) {
     console.warn('Peer error:', err);
     const t = err && err.type ? err.type : 'unknown';
+    if (!networkStatusEl) return;
     if (t === 'peer-unavailable') networkStatusEl.textContent = 'ID не найден';
     else if (t === 'network' || t === 'server-error' || t === 'socket-error') networkStatusEl.textContent = 'сервер сигнализации недоступен';
     else if (t === 'unavailable-id') networkStatusEl.textContent = 'ID уже занят';
-    else networkStatusEl.textContent = `ошибка: ${t}`;
+    else networkStatusEl.textContent = 'ошибка: ' + t;
   });
 }
 
 function attachHostConnection(conn) {
-  conn.on('open', () => {
+  conn.on('open', function () {
     const color = assignNextColor();
     world.hostConnections.set(conn.peer, conn);
     const newCar = addRemoteCar(conn.peer, color, undefined, undefined, undefined);
 
     const roster = [
       { peerId: world.myPeerId, color: world.myColor, x: world.localCar.x, y: world.localCar.y, angle: world.localCar.angle },
-      ...[...world.remoteCars.values()]
-        .filter((car) => car.peerId !== conn.peer)
-        .map((car) => ({ peerId: car.peerId, color: car.color, x: car.x, y: car.y, angle: car.angle })),
     ];
+    for (const car of world.remoteCars.values()) {
+      if (car.peerId === conn.peer) continue;
+      roster.push({ peerId: car.peerId, color: car.color, x: car.x, y: car.y, angle: car.angle });
+    }
 
     sendToConn(conn, 'welcome', { yourColor: color, players: roster, crates: cratesSnapshotPayload() });
-    broadcastFromHost('join', { peerId: conn.peer, color, x: newCar.x, y: newCar.y, angle: newCar.angle }, conn.peer);
+    broadcastFromHost('join', { peerId: conn.peer, color: color, x: newCar.x, y: newCar.y, angle: newCar.angle }, conn.peer);
 
-    networkStatusEl.textContent = 'подключено (хост)';
+    if (networkStatusEl) networkStatusEl.textContent = 'подключено (хост)';
     refreshOpponentStatus();
   });
 
-  conn.on('error', (err) => console.warn('Connection error:', err));
-  conn.on('data', (payload) => handleIncomingData(payload, conn));
+  conn.on('error', function (err) { console.warn('Connection error:', err); });
+  conn.on('data', function (payload) { handleIncomingData(payload, conn); });
 
-  conn.on('close', () => {
+  conn.on('close', function () {
     world.hostConnections.delete(conn.peer);
     removeCarByPeerId(conn.peer);
-    broadcastFromHost('leave', { peerId: conn.peer });
-    if (world.hostConnections.size === 0) networkStatusEl.textContent = 'ждём игроков';
+    broadcastFromHost('leave', { peerId: conn.peer }, null);
+    if (world.hostConnections.size === 0 && networkStatusEl) networkStatusEl.textContent = 'ждём игроков';
     refreshOpponentStatus();
   });
 }
@@ -1092,26 +1108,26 @@ function connectToPeer() {
   world.role = 'client';
   const conn = world.peer.connect(remoteId, { reliable: true, config: ICE_SERVERS });
   world.hostConnection = conn;
-  networkStatusEl.textContent = 'подключение…';
+  if (networkStatusEl) networkStatusEl.textContent = 'подключение…';
 
-  conn.on('open', () => {
-    networkStatusEl.textContent = 'подключено';
+  conn.on('open', function () {
+    if (networkStatusEl) networkStatusEl.textContent = 'подключено';
     refreshOpponentStatus();
 
     const pc = conn.peerConnection;
     if (pc) {
-      pc.oniceconnectionstatechange = () => console.log('[ICE]', pc.iceConnectionState);
-      pc.onconnectionstatechange = () => console.log('[PC]', pc.connectionState);
+      pc.oniceconnectionstatechange = function () { console.log('[ICE]', pc.iceConnectionState); };
+      pc.onconnectionstatechange = function () { console.log('[PC]', pc.connectionState); };
     }
   });
 
-  conn.on('error', (err) => {
+  conn.on('error', function (err) {
     console.warn('Connection error:', err);
-    networkStatusEl.textContent = 'соединение оборвалось';
+    if (networkStatusEl) networkStatusEl.textContent = 'соединение оборвалось';
   });
 
-  conn.on('data', (payload) => handleIncomingData(payload, conn));
-  conn.on('close', () => disconnectFromRoom());
+  conn.on('data', function (payload) { handleIncomingData(payload, conn); });
+  conn.on('close', function () { disconnectFromRoom(); });
 }
 
 function disconnectFromRoom() {
@@ -1124,7 +1140,7 @@ function disconnectFromRoom() {
   world.ping = null;
   world.remoteCars.clear();
   rebuildCarsList();
-  networkStatusEl.textContent = 'ожидание';
+  if (networkStatusEl) networkStatusEl.textContent = 'ожидание';
   for (const crate of world.crates) {
     crate.targetX = crate.x;
     crate.targetY = crate.y;
@@ -1133,19 +1149,26 @@ function disconnectFromRoom() {
 }
 
 function cratesSnapshotPayload() {
-  return { list: world.crates.map((c) => ({ x: c.x, y: c.y, vx: c.vx, vy: c.vy })) };
+  return {
+    list: world.crates.map(function (c) {
+      return { x: c.x, y: c.y, vx: c.vx, vy: c.vy };
+    }),
+  };
 }
 
 function handleIncomingData(payload, fromConn) {
   try {
     const packet = typeof payload === 'string' ? JSON.parse(payload) : payload;
     if (!packet || !packet.type) return;
-    const { type, payload: data } = packet;
+    const type = packet.type;
+    const data = packet.payload;
 
     if (type === 'welcome') {
       world.myColor = data.yourColor;
       if (world.localCar) world.localCar.color = data.yourColor;
-      for (const p of data.players || []) {
+      const players = data.players || [];
+      for (let i = 0; i < players.length; i += 1) {
+        const p = players[i];
         addRemoteCar(p.peerId, p.color, p.x, p.y, p.angle);
       }
       if (data.crates) applyCratesState(data.crates, true);
@@ -1165,10 +1188,10 @@ function handleIncomingData(payload, fromConn) {
 
     if (type === 'state') {
       // Хост доверяет fromConn.peer, а не self-reported peerId из payload.
-      const peerId = world.role === 'host' && fromConn ? fromConn.peer : data.peerId;
+      const peerId = (world.role === 'host' && fromConn) ? fromConn.peer : data.peerId;
       applyRemoteState(peerId, data.x, data.y, data.angle);
       if (world.role === 'host') {
-        broadcastFromHost('state', { ...data, peerId }, peerId);
+        broadcastFromHost('state', { peerId: peerId, x: data.x, y: data.y, angle: data.angle }, peerId);
       }
       return;
     }
@@ -1210,19 +1233,19 @@ if (joystickZone) {
   joystickZone.style.webkitUserSelect = 'none';
   joystickZone.style.webkitTouchCallout = 'none';
 
-  const onPointerMove = (event) => {
+  const onPointerMove = function (event) {
     if (!mobileInput.active || event.pointerId !== mobileInput.pointerId) return;
     event.preventDefault();
     updateJoystickFromPointer(event.clientX, event.clientY);
   };
 
-  const detachWindowListeners = () => {
+  const detachWindowListeners = function () {
     window.removeEventListener('pointermove', onPointerMove);
     window.removeEventListener('pointerup', onPointerUp);
     window.removeEventListener('pointercancel', onPointerUp);
   };
 
-  const onPointerUp = (event) => {
+  const onPointerUp = function (event) {
     if (event.pointerId !== mobileInput.pointerId) return;
     event.preventDefault();
     try { joystickZone.releasePointerCapture(event.pointerId); } catch (e) { /* ignore */ }
@@ -1230,7 +1253,7 @@ if (joystickZone) {
     resetJoystick();
   };
 
-  joystickZone.addEventListener('pointerdown', (event) => {
+  joystickZone.addEventListener('pointerdown', function (event) {
     // Лечим залипание: если предыдущий палец не закрылся корректно,
     // отдаём управление новому касанию.
     if (mobileInput.active && mobileInput.pointerId !== event.pointerId) {
@@ -1255,19 +1278,19 @@ if (joystickZone) {
   }, { passive: false });
 
   // Страховка от залипания при потере фокуса / сворачивании приложения.
-  const emergencyReset = () => {
+  const emergencyReset = function () {
     if (!mobileInput.active) return;
     detachWindowListeners();
     resetJoystick();
   };
   window.addEventListener('blur', emergencyReset);
-  document.addEventListener('visibilitychange', () => {
+  document.addEventListener('visibilitychange', function () {
     if (document.hidden) emergencyReset();
   });
 }
 
 /* ---------- Клавиатура ---------- */
-window.addEventListener('keydown', (event) => {
+window.addEventListener('keydown', function (event) {
   const key = event.key.toLowerCase();
   if (key === 'w' || key === 'arrowup') input.up = true;
   if (key === 's' || key === 'arrowdown') input.down = true;
@@ -1275,7 +1298,7 @@ window.addEventListener('keydown', (event) => {
   if (key === 'd' || key === 'arrowright') input.right = true;
 });
 
-window.addEventListener('keyup', (event) => {
+window.addEventListener('keyup', function (event) {
   const key = event.key.toLowerCase();
   if (key === 'w' || key === 'arrowup') input.up = false;
   if (key === 's' || key === 'arrowdown') input.down = false;
@@ -1285,7 +1308,7 @@ window.addEventListener('keyup', (event) => {
 
 /* ---------- Кнопки ---------- */
 if (resetBtn) {
-  resetBtn.addEventListener('click', () => {
+  resetBtn.addEventListener('click', function () {
     resetRace();
     setCamera();
     broadcastReset();
@@ -1293,38 +1316,48 @@ if (resetBtn) {
 }
 
 if (connectBtn) {
-  connectBtn.addEventListener('click', () => connectToPeer());
+  connectBtn.addEventListener('click', function () { connectToPeer(); });
 }
 
 if (copyLinkBtn) {
-  copyLinkBtn.addEventListener('click', async () => {
+  copyLinkBtn.addEventListener('click', function () {
     const id = peerIdEl.textContent && peerIdEl.textContent !== 'offline' ? peerIdEl.textContent : '';
     if (!id) {
-      networkStatusEl.textContent = 'сначала дождитесь ID';
+      if (networkStatusEl) networkStatusEl.textContent = 'сначала дождитесь ID';
       return;
     }
     const shareLink = getConnectLink(id);
-    try {
-      await navigator.clipboard.writeText(shareLink);
-      networkStatusEl.textContent = 'ссылка скопирована';
-    } catch (error) {
+    const done = function () {
+      if (networkStatusEl) networkStatusEl.textContent = 'ссылка скопирована';
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(shareLink).then(done).catch(function () {
+        const tempInput = document.createElement('input');
+        tempInput.value = shareLink;
+        document.body.appendChild(tempInput);
+        tempInput.select();
+        try { document.execCommand('copy'); } catch (e) { /* ignore */ }
+        tempInput.remove();
+        done();
+      });
+    } else {
       const tempInput = document.createElement('input');
       tempInput.value = shareLink;
       document.body.appendChild(tempInput);
       tempInput.select();
-      document.execCommand('copy');
+      try { document.execCommand('copy'); } catch (e) { /* ignore */ }
       tempInput.remove();
-      networkStatusEl.textContent = 'ссылка скопирована';
+      done();
     }
   });
 }
 
 /* ---------- Resize ---------- */
 window.addEventListener('resize', resizeCanvas);
-window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 150));
+window.addEventListener('orientationchange', function () { setTimeout(resizeCanvas, 150); });
 
 if (typeof ResizeObserver !== 'undefined') {
-  const ro = new ResizeObserver(() => resizeCanvas());
+  const ro = new ResizeObserver(function () { resizeCanvas(); });
   ro.observe(canvas.parentElement);
 }
 
