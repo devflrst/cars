@@ -54,14 +54,20 @@
               <span>Игроков</span>
               <strong id="enemy-label">нет соперников</strong>
             </div>
-            <p class="hint-text">Первый игрок жмёт «Скопировать ссылку» и отправляет её остальным. Каждый следующий просто открывает ссылку — до 8 человек в комнате.</p>
+            <p class="hint-text">
+              Первый игрок жмёт «Скопировать ссылку» и отправляет её остальным.
+              Каждый следующий просто открывает ссылку — до 8 человек в комнате.
+            </p>
           </section>
         </aside>
 
         <section class="game-panel">
           <div class="board-wrap">
             <canvas id="game-canvas" aria-label="Игровая зона"></canvas>
-            <div class="mobile-controls" aria-label="Управление">
+
+            <!-- Зона джойстика: абсолютный слой поверх канваса.
+                 На мобилке ловит pointer-события, база появляется под пальцем. -->
+            <div class="joystick-zone" id="joystick-zone" aria-label="Управление">
               <div class="joystick-base" id="joystick-base">
                 <div class="joystick-knob" id="joystick-knob"></div>
               </div>
