@@ -40,17 +40,35 @@ const NET = {
   crateSnapThresholdSq: 200 * 200,
 };
 
-const ICE_SERVERS = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-  ],
-  iceCandidatePoolSize: 10,
-};
+// Несколько независимых TURN-провайдеров сразу — если один перегружен или
+// недоступен у конкретного оператора, ICE попробует остальные.
+const RELAY_SERVERS = [
+  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:80?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turns:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:relay1.expressturn.com:3478', username: 'ef4NLC6GYS0LR6JULC', credential: 'wZ0R8fqp9y3PxbAe' },
+];
+
+function buildIceConfig(forceRelayOnly) {
+  return {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:openrelay.metered.ca:80' },
+    ].concat(RELAY_SERVERS),
+    iceCandidatePoolSize: 10,
+    // Мобильный интернет почти всегда сидит за CGNAT/симметричным NAT — там
+    // прямое соединение (host/srflx) не построить в принципе, годится только
+    // релей через TURN. Wi-Fi обычно строит прямой канал и без этого.
+    iceTransportPolicy: forceRelayOnly ? 'relay' : 'all',
+  };
+}
+
+const ICE_SERVERS = buildIceConfig(false);
+const CONNECT_TIMEOUT_MS = 8000;
 
 const PLAYER_COLORS = ['#7ef0a5', '#7dd9ff', '#ffd884', '#ff8bb6', '#c792ea', '#f4a261', '#8ee4af', '#f28fad'];
 const MAX_PLAYERS = PLAYER_COLORS.length;
@@ -1024,7 +1042,7 @@ function initPeer() {
     port: 443,
     secure: true,
     path: '/',
-    config: ICE_SERVERS,
+    config: buildIceConfig(false),
     debug: 1,
   });
 
@@ -1096,7 +1114,7 @@ function attachHostConnection(conn) {
   });
 }
 
-function connectToPeer() {
+function connectToPeer(forceRelayOnly) {
   const remoteId = peerInput.value.trim();
   if (!remoteId || !world.peer) return;
 
@@ -1106,28 +1124,71 @@ function connectToPeer() {
   }
 
   world.role = 'client';
-  const conn = world.peer.connect(remoteId, { reliable: true, config: ICE_SERVERS });
+  const iceConfig = buildIceConfig(!!forceRelayOnly);
+  const conn = world.peer.connect(remoteId, { reliable: true, config: iceConfig });
   world.hostConnection = conn;
-  if (networkStatusEl) networkStatusEl.textContent = 'подключение…';
+  if (networkStatusEl) {
+    networkStatusEl.textContent = forceRelayOnly ? 'подключение через сервер-ретранслятор…' : 'подключение…';
+  }
+
+  let settled = false;
+
+  // Если оба игрока не в одной Wi-Fi сети, прямое соединение (STUN) часто
+  // вообще не устанавливается — браузер тихо "зависает" в состоянии
+  // checking/failed. Ждём разумное время и, если открытия так и не
+  // произошло, переподключаемся в режиме "только через TURN-relay" —
+  // это работает и через мобильный интернет, и из разных сетей.
+  const timeoutId = setTimeout(function () {
+    if (settled) return;
+    settled = true;
+    try { conn.close(); } catch (e) { /* ignore */ }
+    if (!forceRelayOnly) {
+      connectToPeer(true);
+    } else if (networkStatusEl) {
+      networkStatusEl.textContent = 'не удалось подключиться (проверьте ID)';
+      world.role = 'idle';
+      world.hostConnection = null;
+    }
+  }, CONNECT_TIMEOUT_MS);
 
   conn.on('open', function () {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeoutId);
     if (networkStatusEl) networkStatusEl.textContent = 'подключено';
     refreshOpponentStatus();
 
     const pc = conn.peerConnection;
     if (pc) {
-      pc.oniceconnectionstatechange = function () { console.log('[ICE]', pc.iceConnectionState); };
+      pc.oniceconnectionstatechange = function () {
+        console.log('[ICE]', pc.iceConnectionState);
+        if (pc.iceConnectionState === 'failed' && world.hostConnection === conn) {
+          disconnectFromRoom();
+        }
+      };
       pc.onconnectionstatechange = function () { console.log('[PC]', pc.connectionState); };
     }
   });
 
   conn.on('error', function (err) {
     console.warn('Connection error:', err);
-    if (networkStatusEl) networkStatusEl.textContent = 'соединение оборвалось';
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeoutId);
+    if (!forceRelayOnly) {
+      connectToPeer(true);
+    } else if (networkStatusEl) {
+      networkStatusEl.textContent = 'соединение оборвалось';
+      world.role = 'idle';
+      world.hostConnection = null;
+    }
   });
 
   conn.on('data', function (payload) { handleIncomingData(payload, conn); });
-  conn.on('close', function () { disconnectFromRoom(); });
+  conn.on('close', function () {
+    if (!settled) return; // close до открытия уже обработан выше (ошибка/тайм-аут)
+    disconnectFromRoom();
+  });
 }
 
 function disconnectFromRoom() {
