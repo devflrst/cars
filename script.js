@@ -53,9 +53,9 @@ async function fetchMeteredTurnServers() {
   if (!METERED_APP || !METERED_API_KEY || METERED_APP === 'YOUR_APP_NAME' || METERED_API_KEY === 'YOUR_API_KEY') {
     return [];
   }
-  const controller = new AbortController();
-  const timeoutId = setTimeout(function () { controller.abort(); }, 4000);
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(function () { controller.abort(); }, 4000);
     const url = 'https://' + METERED_APP + '.metered.live/api/v1/turn/credentials?apiKey=' + METERED_API_KEY;
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timeoutId);
@@ -63,10 +63,34 @@ async function fetchMeteredTurnServers() {
     const servers = await res.json();
     return Array.isArray(servers) ? servers : [];
   } catch (err) {
-    clearTimeout(timeoutId);
     console.warn('Metered TURN недоступен, используем резервные серверы:', err);
     return [];
   }
+}
+
+// Подстраховка: что бы ни случилось с запросом к Metered (зависание, сбой,
+// неподдерживаемый API в старом браузере) — сеть должна стартовать в любом
+// случае максимум через 5 секунд, иначе "Ваш ID" так и останется "offline".
+function withHardTimeout(promise, ms, fallbackValue) {
+  return new Promise(function (resolve) {
+    let done = false;
+    const timer = setTimeout(function () {
+      if (done) return;
+      done = true;
+      resolve(fallbackValue);
+    }, ms);
+    Promise.resolve(promise).then(function (value) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(value);
+    }).catch(function () {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(fallbackValue);
+    });
+  });
 }
 
 // Несколько независимых бесплатных TURN-провайдеров — используются, если
@@ -1493,9 +1517,11 @@ drawWorld();
 requestAnimationFrame(loop);
 
 // Игра уже видна и играбельна локально; сеть поднимаем как только получены
-// (или гарантированно недоступны) свежие TURN-данные от Metered — так первое
-// же подключение сразу использует лучший доступный relay.
-fetchMeteredTurnServers().then(function (servers) {
-  dynamicTurnServers = servers;
+// (или гарантированно недоступны — максимум через 5с) свежие TURN-данные от
+// Metered, чтобы первое же подключение сразу использовало лучший relay.
+// initPeer() в любом случае вызывается ровно один раз, что бы ни случилось
+// с запросом к Metered — иначе "Ваш ID" навсегда остался бы "offline".
+withHardTimeout(fetchMeteredTurnServers(), 5000, []).then(function (servers) {
+  dynamicTurnServers = Array.isArray(servers) ? servers : [];
   initPeer();
 });
