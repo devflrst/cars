@@ -1089,10 +1089,21 @@ function getLinkConnectTarget() {
   return params.get('connect') || params.get('peer') || params.get('join') || '';
 }
 
+// 0.peerjs.com в какой-то момент начал блокировать CORS у своего REST-эндпоинта
+// "/peerjs/id" — он используется ТОЛЬКО чтобы выдать случайный ID, если его не
+// передать самим. Если сгенерировать ID на клиенте и передать явно, PeerJS
+// вообще не обращается к этому эндпоинту и подключается сразу по WebSocket.
+function generateLocalPeerId() {
+  return 'sky-' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36);
+}
+
+let peerInitAttempts = 0;
+
 function initPeer() {
   if (world.peer) world.peer.destroy();
+  peerInitAttempts += 1;
 
-  world.peer = new Peer(undefined, {
+  world.peer = new Peer(generateLocalPeerId(), {
     host: '0.peerjs.com',
     port: 443,
     secure: true,
@@ -1102,6 +1113,7 @@ function initPeer() {
   });
 
   world.peer.on('open', function (id) {
+    peerInitAttempts = 0;
     world.myPeerId = id;
     if (world.localCar) world.localCar.peerId = id;
     if (peerIdEl) peerIdEl.textContent = id;
@@ -1128,6 +1140,11 @@ function initPeer() {
   world.peer.on('error', function (err) {
     console.warn('Peer error:', err);
     const t = err && err.type ? err.type : 'unknown';
+    // Наш случайный ID (крайне маловероятно) уже занят — пробуем ещё раз с новым.
+    if (t === 'unavailable-id' && peerInitAttempts < 5) {
+      initPeer();
+      return;
+    }
     if (!networkStatusEl) return;
     if (t === 'peer-unavailable') networkStatusEl.textContent = 'ID не найден';
     else if (t === 'network' || t === 'server-error' || t === 'socket-error') networkStatusEl.textContent = 'сервер сигнализации недоступен';
