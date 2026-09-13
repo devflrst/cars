@@ -40,8 +40,37 @@ const NET = {
   crateSnapThresholdSq: 200 * 200,
 };
 
-// Несколько независимых TURN-провайдеров сразу — если один перегружен или
-// недоступен у конкретного оператора, ICE попробует остальные.
+// --- Metered TURN (опционально) ---
+// Зарегистрируйтесь на metered.ca, создайте TURN-приложение и вставьте сюда
+// его поддомен и API-ключ. Если оставить заглушки — код просто продолжит
+// работать на резервных бесплатных серверах (RELAY_SERVERS ниже).
+const METERED_APP = 'skyislanddrift';   // skyislanddrift.metered.live
+const METERED_API_KEY = 'XB2qbWxy2VDsEdF_pAsh9hm1uA8e9rdoIMC6a7-UPGTi-2j6';
+
+let dynamicTurnServers = [];
+
+async function fetchMeteredTurnServers() {
+  if (!METERED_APP || !METERED_API_KEY || METERED_APP === 'YOUR_APP_NAME' || METERED_API_KEY === 'YOUR_API_KEY') {
+    return [];
+  }
+  const controller = new AbortController();
+  const timeoutId = setTimeout(function () { controller.abort(); }, 4000);
+  try {
+    const url = 'https://' + METERED_APP + '.metered.live/api/v1/turn/credentials?apiKey=' + METERED_API_KEY;
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (!res.ok) throw new Error('Metered ответил ' + res.status);
+    const servers = await res.json();
+    return Array.isArray(servers) ? servers : [];
+  } catch (err) {
+    clearTimeout(timeoutId);
+    console.warn('Metered TURN недоступен, используем резервные серверы:', err);
+    return [];
+  }
+}
+
+// Несколько независимых бесплатных TURN-провайдеров — используются, если
+// свой ключ Metered не настроен или временно недоступен.
 const RELAY_SERVERS = [
   { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:openrelay.metered.ca:80?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
@@ -51,14 +80,17 @@ const RELAY_SERVERS = [
   { urls: 'turn:relay1.expressturn.com:3478', username: 'ef4NLC6GYS0LR6JULC', credential: 'wZ0R8fqp9y3PxbAe' },
 ];
 
+const STUN_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:openrelay.metered.ca:80' },
+];
+
 function buildIceConfig(forceRelayOnly) {
+  const turnList = dynamicTurnServers.length ? dynamicTurnServers : RELAY_SERVERS;
   return {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:openrelay.metered.ca:80' },
-    ].concat(RELAY_SERVERS),
+    iceServers: STUN_SERVERS.concat(turnList),
     iceCandidatePoolSize: 10,
     // Мобильный интернет почти всегда сидит за CGNAT/симметричным NAT — там
     // прямое соединение (host/srflx) не построить в принципе, годится только
@@ -67,7 +99,6 @@ function buildIceConfig(forceRelayOnly) {
   };
 }
 
-const ICE_SERVERS = buildIceConfig(false);
 const CONNECT_TIMEOUT_MS = 12000;
 
 const PLAYER_COLORS = ['#7ef0a5', '#7dd9ff', '#ffd884', '#ff8bb6', '#c792ea', '#f4a261', '#8ee4af', '#f28fad'];
@@ -1457,7 +1488,14 @@ resizeCanvas();
 seedClouds();
 seedCrates();
 resetRace();
-initPeer();
 update(0.016);
 drawWorld();
 requestAnimationFrame(loop);
+
+// Игра уже видна и играбельна локально; сеть поднимаем как только получены
+// (или гарантированно недоступны) свежие TURN-данные от Metered — так первое
+// же подключение сразу использует лучший доступный relay.
+fetchMeteredTurnServers().then(function (servers) {
+  dynamicTurnServers = servers;
+  initPeer();
+});
